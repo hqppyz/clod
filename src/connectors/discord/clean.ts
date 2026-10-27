@@ -1,4 +1,4 @@
-import type { Collection, GuildTextBasedChannel, Message } from "discord.js";
+import type { Collection, GuildTextBasedChannel, Message } from 'discord.js';
 
 // Deletes every message in the channel, newest first: those under 14 days old
 // in bulk, older ones one at a time, as Discord allows. Stops when a round

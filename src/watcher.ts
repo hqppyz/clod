@@ -1,11 +1,12 @@
-import { existsSync, watch, type FSWatcher } from "node:fs";
-import { basename, dirname, join } from "node:path";
-import { ConfigError, type PathConfig } from "./config";
-import { resolveDirs } from "./dirs";
+import { existsSync, watch, type FSWatcher } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import type { Clod } from './clod';
+import { ConfigError } from './config';
+import { resolveDirs } from './dirs';
 
 export type DirEvent =
-  | { readonly type: "added" | "removed"; readonly entry: PathConfig; readonly dir: string }
-  | { readonly type: "ready" };
+  | { readonly type: 'added' | 'removed'; readonly entry: Clod.Path; readonly dir: string }
+  | { readonly type: 'ready' };
 
 const DEBOUNCE_MS = 200;
 const GLOB_CHARS = /[*?[\]{}!]/;
@@ -15,14 +16,14 @@ const GLOB_CHARS = /[*?[\]{}!]/;
 // entry path itself being created or deleted. In auto mode, also the entry
 // path and the static prefix of each include pattern ("a/b/*" -> "a/b").
 // Changes below a pattern's first wildcard level ("a/*/c") are not seen.
-function watchTargets(entry: PathConfig): Map<string, string | undefined> {
+function watchTargets(entry: Clod.Path): Map<string, string | undefined> {
   const targets = new Map<string, string | undefined>([[dirname(entry.path), basename(entry.path)]]);
-  if (entry.mode === "manual") return targets;
+  if (entry.mode === 'manual') return targets;
 
   targets.set(entry.path, undefined);
   for (const pattern of entry.include) {
     const prefix: string[] = [];
-    for (const segment of pattern.split("/").slice(0, -1)) {
+    for (const segment of pattern.split('/').slice(0, -1)) {
       if (GLOB_CHARS.test(segment)) break;
       prefix.push(segment);
     }
@@ -31,7 +32,7 @@ function watchTargets(entry: PathConfig): Map<string, string | undefined> {
   return targets;
 }
 
-async function safeResolve(entry: PathConfig): Promise<Set<string>> {
+async function safeResolve(entry: Clod.Path): Promise<Set<string>> {
   try {
     return new Set(await resolveDirs(entry));
   } catch (e) {
@@ -44,7 +45,7 @@ async function safeResolve(entry: PathConfig): Promise<Set<string>> {
 // Yields an "added" event for every matching directory at startup, then
 // "ready", then "added"/"removed" as the filesystem changes. Stops watching when the
 // consumer breaks out of the loop.
-export async function* watchDirs(entries: readonly PathConfig[]): AsyncGenerator<DirEvent> {
+export async function* watchDirs(entries: readonly Clod.Path[]): AsyncGenerator<DirEvent> {
   const queue: DirEvent[] = [];
   let wake: (() => void) | undefined;
   const push = (event: DirEvent) => {
@@ -75,7 +76,7 @@ export async function* watchDirs(entries: readonly PathConfig[]): AsyncGenerator
         const watcher = watch(dir, (_, filename) => {
           if (only === undefined || filename === only) onChange();
         });
-        watcher.on("error", () => {
+        watcher.on('error', () => {
           watcher.close();
           watchers.delete(dir);
         });
@@ -85,8 +86,8 @@ export async function* watchDirs(entries: readonly PathConfig[]): AsyncGenerator
 
     const rescan = async () => {
       const now = await safeResolve(entry);
-      for (const dir of now) if (!known.has(dir)) push({ type: "added", entry, dir });
-      for (const dir of known) if (!now.has(dir)) push({ type: "removed", entry, dir });
+      for (const dir of now) if (!known.has(dir)) push({ type: 'added', entry, dir });
+      for (const dir of known) if (!now.has(dir)) push({ type: 'removed', entry, dir });
       known = now;
       sync();
     };
@@ -106,7 +107,7 @@ export async function* watchDirs(entries: readonly PathConfig[]): AsyncGenerator
     await pending;
   }
 
-  push({ type: "ready" });
+  push({ type: 'ready' });
 
   try {
     while (true) {

@@ -1,14 +1,14 @@
-import { join } from "node:path";
-import { Message, type ChatInputCommandInteraction, type SendableChannels } from "discord.js";
-import { Asking } from "./ask";
-import { showUsage } from "./presence";
-import { claudeHome, installClaudeMd, installSettings, Session, type Ask, type Reply } from "./claude";
-import { launchFor, type Config, type Effort, type Launch } from "./config";
-import { withStatus, type Status } from "./channels";
-import { cost, effortSet, isThinking, LiveReply, session, type Outlet, type RawEvent } from "./log";
-
-// A session with no turn for this long exits; the next message resumes the chat
-const IDLE_MS = 5 * 60_000;
+import { join } from 'node:path';
+import { Message, type ChatInputCommandInteraction, type Guild, type SendableChannels } from 'discord.js';
+import type { Instance } from '../../claude';
+import { Session } from '../../session';
+import type { Connector } from '..';
+import type { Discord, Path } from '.';
+import { Asking } from './ask';
+import { Permitting } from './permit';
+import { showUsage } from './presence';
+import { withStatus, type Status } from './channels';
+import { LiveReply, prompt, type Outlet } from './log';
 
 // Discord allows two topic changes per 10 minutes per channel
 const TOPIC_WRITES = 2;
@@ -36,8 +36,6 @@ const idOf = (input: Input) => (input instanceof Message ? input.id : input.inte
 const channelOf = (input: Input) => (input instanceof Message ? input.channel : input.interaction.channel) as SendableChannels;
 
 interface Saved {
-  readonly dir: string;
-  readonly sessionId?: string;
   // The newest message Claude has answered; later ones are caught up on at startup
   readonly lastMessageId?: string;
 }
@@ -51,7 +49,7 @@ const byId = (a: Input, b: Input) => {
 // Claude can tell them apart
 function merge(batch: readonly Input[]): string {
   if (batch.length === 1) return batch[0] instanceof Message ? batch[0].content : batch[0]!.prompt;
-  return (batch as Message[]).map((m) => `${m.author.displayName}: ${m.content}`).join("\n\n");
+  return (batch as Message[]).map((m) => `${m.author.displayName}: ${m.content}`).join('\n\n');
 }
 
 // Shows "typing" in the channel while on. Discord can't take it back, so once
@@ -85,7 +83,7 @@ class TopicWriter {
   private written: string | undefined;
 
   update(channel: SendableChannels, change: Status) {
-    if (!("setTopic" in channel)) return;
+    if (!('setTopic' in channel)) return;
     this.channel = channel;
     this.status = { ...this.status, ...change };
     const oldest = this.writes.length < TOPIC_WRITES ? 0 : this.writes[0]! + TOPIC_WINDOW_MS;
@@ -95,19 +93,19 @@ class TopicWriter {
   private async write() {
     this.timer = undefined;
     const channel = this.channel;
-    if (!channel || !("setTopic" in channel)) return;
+    if (!channel || !('setTopic' in channel)) return;
     const status = this.status;
     this.status = {};
     const current = this.written ?? channel.topic;
     const topic = withStatus(current, status);
-    if (topic === (current ?? "")) return;
+    if (topic === (current ?? '')) return;
     this.written = topic;
     this.writes = [...this.writes, Date.now()].slice(-TOPIC_WRITES);
     // Logged once Discord takes it, which its rate limit can hold back for minutes
     await channel
       .setTopic(topic)
       .then(() => console.log(`topic of #${channel.name}: ${JSON.stringify(topic)}`))
-      .catch((e) => console.error("failed to set the channel topic:", e));
+      .catch((e) => console.error('failed to set the channel topic:', e));
   }
 }
 
@@ -141,84 +139,88 @@ function channelOutlet(channel: SendableChannels): Outlet {
   };
 }
 
-// Every channel's chat, kept in <data>/chats.json so a restart picks each one up
+// What each channel has seen, kept in <data>/chats.json so a restart catches
+// up on what came in meanwhile
 export class Chats {
-  private readonly chats = new Map<string, Chat>();
   private writing: Promise<unknown> = Promise.resolve();
 
   private constructor(
-    private readonly config: Config,
     private readonly path: string,
     private readonly saved: Map<string, Saved>,
-    // Turns wait for this, so messages sent before Claude is logged in queue up
-    readonly ready: Promise<unknown>,
-    // The bot's Discord username, for CLAUDE.md's {{BOT_NAME}}
-    private readonly botName: () => string,
   ) {}
 
-  async install(): Promise<void> {
-    await installClaudeMd(this.config, this.botName());
-    await installSettings(this.config);
-  }
-
-  static async load(config: Config, ready: Promise<unknown>, botName: () => string): Promise<Chats> {
-    const path = join(config.dataDir, "chats.json");
+  static async load(dataDir: string): Promise<Chats> {
+    const path = join(dataDir, 'chats.json');
     const file = Bun.file(path);
     const saved: Record<string, Saved> = (await file.exists()) ? await file.json() : {};
-    return new Chats(config, path, new Map(Object.entries(saved)), ready, botName);
+    return new Chats(path, new Map(Object.entries(saved)));
   }
 
   get(channelId: string): Saved | undefined {
     return this.saved.get(channelId);
   }
 
-  // Channels Claude has answered in before, which can have missed messages
-  answered(): string[] {
-    return [...this.saved].filter(([, s]) => s.lastMessageId).map(([id]) => id);
-  }
-
   save(channelId: string, saved: Saved) {
     this.saved.set(channelId, saved);
     const json = JSON.stringify(Object.fromEntries(this.saved), null, 2);
-    this.writing = this.writing.then(() => Bun.write(this.path, json)).catch((e) => console.error("failed to save chats:", e));
-  }
-
-  chat(channelId: string, dir: string): Chat {
-    let chat = this.chats.get(channelId);
-    if (!chat) this.chats.set(channelId, (chat = new Chat(this, channelId, dir, claudeHome(this.config), this.config.claude.effort, launchFor(this.config, dir))));
-    return chat;
-  }
-
-  // Ends every running session, as before the bot exits
-  stop() {
-    for (const chat of this.chats.values()) chat.stop();
+    this.writing = this.writing.then(() => Bun.write(this.path, json)).catch((e) => console.error('failed to save chats:', e));
   }
 }
 
-// A channel's conversation. Messages that arrive while Claude works go out
-// merged into the next turn; commands always get a turn of their own.
-export class Chat {
+// A turn being shown in the channel
+interface Live {
+  reply: LiveReply;
+  readonly typing: Typing;
+}
+
+// A channel's side of its session. Messages that arrive while Claude works go
+// out merged into the next turn; commands always get a turn of their own.
+// Turns sent from elsewhere show as plain messages in the channel. It's the
+// Discord connector's attachment to the session.
+export class Chat implements Connector.Attachment {
   private readonly seen = new Set<string>();
   private pending: Input[] = [];
-  private session: Session | undefined;
-  // The session's effort, which the init event doesn't tell
-  private effort: string;
   // A question Claude asked; the next message answers it instead of starting a
   // turn, and a command interrupts the turn so it can run
   private asking: Asking | undefined;
+  // Tool calls waiting for Allow or Deny; a command interrupts the turn too
+  private permitting = 0;
   private readonly topic = new TopicWriter();
   private draining = false;
-  private idle: Timer | undefined;
+  // The turn this channel is sending, set up before the session starts it
+  private live: Live | undefined;
+  // The turn the session is running, this channel's or not
+  private current: Live | undefined;
 
   constructor(
     private readonly chats: Chats,
+    private readonly discord: Discord,
+    private readonly guild: Guild,
     readonly channelId: string,
-    readonly dir: string,
-    private readonly home: string,
-    private readonly startEffort: Effort,
-    private readonly launch: Launch,
-  ) {
-    this.effort = startEffort;
+    readonly session: Session,
+    readonly path: Path,
+  ) {}
+
+  async lifecycle(event: Instance.Event): Promise<void> {
+    if (event.type === 'started') this.refresh(event.instance);
+    if (event.type !== 'starting') return;
+    const bullet = await this.discord.bullet();
+    if (bullet) event.options.prompts.push(bullet);
+  }
+
+  // Reads the instance's model, effort and mode into the topic; events
+  // update them between reads
+  private refresh(instance: Instance | undefined) {
+    const channel = this.channel();
+    if (!instance || !channel) return;
+    instance
+      .settings()
+      .then((settings) => this.topic.update(channel, settings))
+      .catch((e) => console.error(`failed to read the settings of ${this.session.dir}:`, e));
+  }
+
+  async [Symbol.asyncDispose](): Promise<void> {
+    await this.discord.detach(this);
   }
 
   // Skips messages already answered or queued, so catch-up and live messages can overlap
@@ -232,19 +234,81 @@ export class Chat {
         this.asking.type(input.content);
         continue;
       }
-      if (this.asking) this.session?.interrupt();
+      if (this.asking || this.permitting > 0) this.session.interrupt();
       this.pending.push(input);
     }
     this.pending.sort(byId);
-    this.drain().catch((e) => console.error(`chat in ${this.dir} failed:`, e));
+    this.drain().catch((e) => console.error(`chat in ${this.session.dir} failed:`, e));
+  }
+
+  // An event of the session. This channel's turns answer their input; the
+  // others' replies go to the channel under their prompt, and end with their turn.
+  observe(event: Session.Event | Session.Turn) {
+    const channel = this.channel();
+    if (event.type === 'turn_start') {
+      if (event.from === this.discord) this.current = this.live;
+      else if (channel) {
+        const reply = new LiveReply(channelOutlet(channel), undefined, false);
+        reply.note(prompt(event.from?.id ?? 'app', event.text));
+        this.current = { reply, typing: new Typing(channel) };
+      }
+      return;
+    }
+    if (event.type === 'turn_end') {
+      // A turn can change them, like /model or plan mode ending
+      this.refresh(this.session.instance);
+      const current = this.current;
+      this.current = undefined;
+      // This channel's own turn finishes in drain, with the reply it awaits
+      if (!current || current === this.live) return;
+      current.typing.set(false);
+      current.reply.finish(event.reply).catch((e) => console.error(`failed to show a turn in ${this.session.dir}:`, e));
+      return;
+    }
+    if (!channel) return;
+    if (event.type === 'system' && event.subtype === 'init') {
+      this.topic.update(channel, Session.status(event));
+    }
+    if (event.type === 'result') {
+      const effort = Session.effortSet(event);
+      if (effort) this.topic.update(channel, { effort });
+      const cost = Session.cost(event);
+      if (cost) this.topic.update(channel, { cost });
+    }
+    if (event.type === 'rate_limit_event') showUsage(this.guild, event);
+    const current = this.current;
+    if (!current) return;
+    current.typing.set(Session.isThinking(event));
+    current.reply.add(event);
+  }
+
+  // Asks for Allow or Deny below the turn's messages so far; what follows goes in new ones below it.
+  // Questions go to whoever sent the turn, so this leaves them to others.
+  async permit(permission: Session.Permission, signal: AbortSignal): Promise<Session.Decision> {
+    const channel = this.channel();
+    if (!channel) throw new Error('the channel is gone');
+    if (permission.tool === 'AskUserQuestion') throw new Error('questions go to whoever sent the turn');
+    const current = this.current;
+    await current?.reply.settle();
+    const permitting = await Permitting.post(channel, permission, signal);
+    if (current) current.reply = current.reply.below(channelOutlet(channel));
+    this.permitting++;
+    try {
+      return await permitting.decided;
+    } finally {
+      this.permitting--;
+    }
+  }
+
+  private channel(): SendableChannels | undefined {
+    const channel = this.guild.channels.cache.get(this.channelId);
+    return channel?.isSendable() ? channel : undefined;
   }
 
   private async drain() {
     if (this.draining) return;
     this.draining = true;
-    clearTimeout(this.idle);
     try {
-      await this.chats.ready;
       while (this.pending.length > 0) {
         // Messages up to the next command, or the command alone
         const command = this.pending.findIndex((input) => !(input instanceof Message));
@@ -253,74 +317,31 @@ export class Chat {
         // Typing shows that Claude is thinking
         const typing = new Typing(channelOf(last));
         // A question ends the turn's messages so far; what follows goes in new ones below it
-        const calls = new Map<string, RawEvent>();
-        let live = new LiveReply(outlet(last), calls);
+        const calls = new Map<string, Session.ToolUse>();
+        const live: Live = (this.live = { reply: new LiveReply(outlet(last), calls), typing });
         try {
-          const ask: Ask = async (questions, signal) => {
-            await live.settle();
+          const ask: Session.Ask = async (questions, signal) => {
+            await live.reply.settle();
             const channel = channelOf(last);
             const asking = (this.asking = await Asking.post(channel, questions, signal));
-            live = new LiveReply(channelOutlet(channel), calls);
+            live.reply = live.reply.below(channelOutlet(channel));
             try {
               return await asking.answered;
             } finally {
               this.asking = undefined;
             }
           };
-          const guild = last instanceof Message ? last.guild : last.interaction.guild;
-          const onEvent = (event: RawEvent) => {
-            if (event.type === "system" && event.subtype === "init") {
-              this.topic.update(channelOf(last), { ...session(event), effort: this.effort });
-            }
-            if (event.type === "result") {
-              const effort = effortSet(event);
-              if (effort) this.topic.update(channelOf(last), { effort: (this.effort = effort) });
-              if (cost(event)) this.topic.update(channelOf(last), { cost: cost(event) });
-            }
-            if (event.type === "rate_limit_event" && guild) showUsage(guild, event);
-            typing.set(isThinking(event));
-            live.add(event);
-          };
-          const reply = await this.turn(merge(batch), onEvent, ask);
-          await live.finish(reply);
+          const reply = await this.session.prompt(merge(batch), this.discord, ask);
+          await live.reply.finish(reply);
         } finally {
           typing.set(false);
+          if (this.current === live) this.current = undefined;
+          this.live = undefined;
         }
-        this.chats.save(this.channelId, { ...this.chats.get(this.channelId)!, lastMessageId: idOf(last) });
+        this.chats.save(this.channelId, { lastMessageId: idOf(last) });
       }
     } finally {
       this.draining = false;
     }
-    this.idle = setTimeout(() => this.stop(), IDLE_MS);
-  }
-
-  private async turn(prompt: string, onEvent: (event: RawEvent) => void, ask: Ask): Promise<Reply> {
-    const saved = this.chats.get(this.channelId);
-    // Claude keeps conversations per project directory, so a new directory starts over
-    if (!this.session) {
-      await this.chats.install();
-      this.session = await Session.start(this.dir, this.home, this.startEffort, this.launch, saved?.dir === this.dir ? saved.sessionId : undefined);
-      this.effort = this.startEffort;
-    }
-    const session = this.session;
-    const reply = await session.send(prompt, onEvent, ask);
-    if (session.dead) {
-      this.session = undefined;
-      // A resume that dies before starting means the conversation is gone
-      if (session.resumed && !session.started && !session.closed) {
-        console.error(`chat in ${this.dir} could not resume, starting over: ${reply.text}`);
-        this.chats.save(this.channelId, { dir: this.dir, lastMessageId: saved?.lastMessageId });
-        return this.turn(prompt, onEvent, ask);
-      }
-    }
-    this.chats.save(this.channelId, { ...saved, dir: this.dir, sessionId: session.sessionId });
-    return reply;
-  }
-
-  // Ends the session, cutting off a running turn; the next message resumes the
-  // conversation in a new process
-  stop() {
-    this.session?.close();
-    this.session = undefined;
   }
 }

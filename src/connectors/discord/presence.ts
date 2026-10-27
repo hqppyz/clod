@@ -1,5 +1,5 @@
-import { ActivityType, type Guild, type PresenceStatusData, type Role } from "discord.js";
-import { usage, type RawEvent } from "./log";
+import { ActivityType, type Guild, type PresenceStatusData, type Role } from 'discord.js';
+import { Session } from '../../session';
 
 // The bot's status turns idle, then do not disturb, as what's left of the 5-hour window drops below these
 const IDLE_BELOW = 0.5;
@@ -11,21 +11,21 @@ const COLORS = { online: 0x2ecc71, idle: 0xf1c40f, dnd: 0xe74c3c } as const;
 // The reset times count down, so the status is redrawn while there is usage to show
 const REFRESH_MS = 60_000;
 
-let latest: { guild: Guild; event: RawEvent } | undefined;
+let latest: { guild: Guild; event: Session.RateLimit } | undefined;
 let timer: Timer | undefined;
 let shown: string | undefined;
 let named: string | undefined;
 let colored: PresenceStatusData | undefined;
 let role: Promise<Role> | undefined;
 
-export function statusFor(event: RawEvent): keyof typeof COLORS {
+export function statusFor(event: Session.RateLimit): keyof typeof COLORS {
   const left = 1 - (event.rate_limit_info?.unifiedWindows?.five_hour?.utilization ?? 0);
-  return left < DND_BELOW ? "dnd" : left < IDLE_BELOW ? "idle" : "online";
+  return left < DND_BELOW ? 'dnd' : left < IDLE_BELOW ? 'idle' : 'online';
 }
 
 // Shows the account's usage from a rate limit event in the bot's nickname in guild,
 // its reset as the bot's custom status, and colors the bot's name after it
-export function showUsage(guild: Guild, event: RawEvent) {
+export function showUsage(guild: Guild, event: Session.RateLimit) {
   latest = { guild, event };
   draw();
   timer ??= setInterval(draw, REFRESH_MS);
@@ -40,10 +40,10 @@ async function usageRole(guild: Guild): Promise<Role> {
   const name = `${me.user.username}-usage`;
   const top = me.roles.highest;
   let role = guild.roles.cache.find((r) => r.name === name);
-  if (!role) role = await guild.roles.create({ name, position: top.position, reason: "Shows Claude usage" });
+  if (!role) role = await guild.roles.create({ name, position: top.position, reason: 'Shows Claude usage' });
   // A re-invited bot gets a new role at the bottom, under an old usage role
   else if (role.comparePositionTo(top) >= 0) throw new Error(`move the bot's role ${top.name} above ${name}`);
-  else if (role.position < top.position - 1) role = await role.setPosition(top.position - 1, { reason: "Shows Claude usage" });
+  else if (role.position < top.position - 1) role = await role.setPosition(top.position - 1, { reason: 'Shows Claude usage' });
   if (!me.roles.cache.has(role.id)) await me.roles.add(role);
   return role;
 }
@@ -58,7 +58,7 @@ function color(guild: Guild, status: keyof typeof COLORS) {
     .catch((e) => {
       role = undefined;
       colored = undefined;
-      console.error("failed to color the usage role:", e);
+      console.error('failed to color the usage role:', e);
     });
 }
 
@@ -69,17 +69,17 @@ function rename(guild: Guild, percent: number) {
   named = nick;
   guild.members
     .fetchMe()
-    .then((me) => me.setNickname(nick, "Shows Claude usage"))
+    .then((me) => me.setNickname(nick, 'Shows Claude usage'))
     .catch((e) => {
       named = undefined;
-      console.error("failed to set the usage nickname:", e);
+      console.error('failed to set the usage nickname:', e);
     });
 }
 
 function draw() {
   const client = latest?.guild.client;
   if (!latest || !client?.user) return;
-  const window = usage(latest.event);
+  const window = Session.usage(latest.event);
   if (!window) return;
   const status = statusFor(latest.event);
   color(latest.guild, status);
@@ -88,5 +88,5 @@ function draw() {
   // Presence updates are rate limited too, so an unchanged one isn't sent
   if (shown === `${status} ${text}`) return;
   shown = `${status} ${text}`;
-  client.user.setPresence({ status, activities: text ? [{ type: ActivityType.Custom, name: "usage", state: text }] : [] });
+  client.user.setPresence({ status, activities: text ? [{ type: ActivityType.Custom, name: 'usage', state: text }] : [] });
 }

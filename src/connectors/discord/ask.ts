@@ -9,8 +9,8 @@ import {
   type Message,
   type SendableChannels,
   type StringSelectMenuInteraction,
-} from "discord.js";
-import type { Question } from "./claude";
+} from 'discord.js';
+import type { Session } from '../../session';
 
 // Discord's limit on the text of a message made of components
 const MAX_TEXT = 4000;
@@ -26,7 +26,7 @@ const cut = (text: string, max: number) => (text.length > max ? `${text.slice(0,
 const text = (content: string) => new TextDisplayBuilder().setContent(content);
 
 // The questions in one box, each above its menu when it has one and split from the next by a line
-function box(questions: readonly Question[], rows: readonly ActionRowBuilder<StringSelectMenuBuilder>[], footer: string) {
+function box(questions: readonly Session.Question[], rows: readonly ActionRowBuilder<StringSelectMenuBuilder>[], footer: string) {
   const box = new ContainerBuilder();
   questions.forEach((q, i) => {
     if (i > 0) box.addSeparatorComponents(new SeparatorBuilder());
@@ -55,9 +55,9 @@ export class Asking {
   private readonly done = Promise.withResolvers<Record<string, string>>();
   readonly answered = this.done.promise;
 
-  private constructor(private readonly questions: readonly Question[]) {}
+  private constructor(private readonly questions: readonly Session.Question[]) {}
 
-  static async post(channel: SendableChannels, questions: readonly Question[], signal: AbortSignal): Promise<Asking> {
+  static async post(channel: SendableChannels, questions: readonly Session.Question[], signal: AbortSignal): Promise<Asking> {
     const asking = new Asking(questions);
     const rows = questions.map((q, i) => {
       const options = q.options.slice(0, MAX_OPTIONS);
@@ -78,22 +78,22 @@ export class Asking {
     // A message of components, so each question sits above its menu and the hint below them all
     const message: Message = await channel.send({
       flags: MessageFlags.IsComponentsV2,
-      components: [box(questions, rows, "-# ...or type an answer.")],
+      components: [box(questions, rows, '-# ...or type an answer.')],
     });
 
     open.set(message.id, asking);
-    const skip = () => asking.done.reject(new Error("the questions were skipped"));
+    const skip = () => asking.done.reject(new Error('the questions were skipped'));
     if (signal.aborted) skip();
-    else signal.addEventListener("abort", skip, { once: true });
+    else signal.addEventListener('abort', skip, { once: true });
     asking.answered
       .catch(() => {
         // Shows that the questions were skipped in place of the menus
-        return message.edit({ components: [box(questions, [], "-# Skipped.")] });
+        return message.edit({ components: [box(questions, [], '-# Skipped.')] });
       })
-      .catch((e) => console.error("failed to close the question:", e))
+      .catch((e) => console.error('failed to close the question:', e))
       .finally(() => {
         open.delete(message.id);
-        signal.removeEventListener("abort", skip);
+        signal.removeEventListener('abort', skip);
       });
     return asking;
   }
@@ -102,7 +102,7 @@ export class Asking {
   select(i: number, values: readonly string[]) {
     const options = this.questions[i]?.options;
     if (!options) return;
-    this.answers.set(i, values.map((v) => options[Number(v)]!.label).join(", "));
+    this.answers.set(i, values.map((v) => options[Number(v)]!.label).join(', '));
     this.check();
   }
 

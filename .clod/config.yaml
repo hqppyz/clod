@@ -1,0 +1,63 @@
+paths:
+  - /home/me:
+      mode: manual # no channels will be created, instead, it will only link the includes to their channel
+      args: ['--setting-sources', 'user'] # optional, ignores /home/me/.claude
+      connectors: # optional, per connector settings for this path, keyed by connector name
+        rc:
+          name: home # optional, the session's name in claude.ai/code and the app
+        discord:
+          channel_id: '1234' # required when using manual mode
+  - /home/me/Projects:
+      mode: auto # automatically manages creation and deletion of channels based off the parent directory
+      include: # a glob or a list of globs; channels follow this order, "." is the path itself
+        - clod
+        - 'whatever'
+      connectors:
+        rc:
+          name: 'proj-{{NAME}}' # optional, overrides the connector's name for this path's sessions
+        discord:
+          category_id: '1234' # optional, channels go under this category
+          admin-only: false # optional, overrides this connector's admin-only for this path
+  - /home/me/Documents:
+      mode: auto # no connectors, so every connector serves it with defaults: on discord, channels go at the top of the server
+      args: ['--permission-mode', 'dontAsk'] # overrides settings.json's permissions.defaultMode; denies whatever is not pre-allowed
+      env: # optional, merged over claude.env
+        ANTHROPIC_MODEL: sonnet # instances here start on Sonnet; /model still changes it
+        CLAUDE_CODE_EFFORT_LEVEL: low # forces this effort; /effort can't change it. The default lives in settings.json's effortLevel
+      include:
+        - '.' # Documents itself
+        - '*' # every subdirectory
+      exclude: # optional, globs to leave out of include
+        - Photos
+        - Pictures
+  - /home/me/Private:
+      mode: auto
+      args: ['--permission-mode', 'plan'] # the most restrictive: Claude can read, but not edit or run anything
+      env:
+        ENABLE_CLAUDEAI_MCP_SERVERS: '' # empty, as if unset: claude.env's 'false' no longer applies, so claude.ai connectors load here
+      connectors:
+        discord:
+          enabled: false # optional, defaults to true; false keeps this path off this connector
+        # no rc block, so rc serves it with defaults: reachable from claude.ai/code and the app only
+
+claude:
+  args: # optional, extra `claude` arguments for every instance
+    - --disallowedTools # tools a Discord chat has no use for
+    - ReportFindings
+    - ListAgents
+    - ScheduleWakeup
+  env: # optional, extra environment for every instance
+    ENABLE_CLAUDEAI_MCP_SERVERS: 'false' # no claude.ai connectors (Claude Docs and similar)
+
+connectors: # the backends sessions are reachable from, keyed by name
+  rc:
+    type: remote-control # sessions also show up in claude.ai/code and the Claude app, sharing the session with the other connectors
+    enabled: true # optional, defaults to false; false turns this connector off, whatever the paths say
+    name: 'clod-{{NAME}}' # optional, default session name for every path; {{NAME}} is the directory's name, like its channel's; defaults to '{{NAME}}'
+  discord:
+    type: discord
+    enabled: true
+    token: CHANGEME # not needed when DISCORD_TOKEN is set
+    server-id: '1234' # this is a single server bot
+    admin-id: '1234' # a user id, a list of user ids, of people that can manage the bot
+    # admin-only: true # optional, defaults to true; if disabled, anybody can chat with the bot; a path can override it

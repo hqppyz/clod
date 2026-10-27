@@ -1,0 +1,1 @@
+- `{{CONNECTOR}}`: Discord, as the bot `{{BOT_NAME}}`. Each channel is one directory. Prompts from it start with `[{{CONNECTOR}}]`. Use Discord markdown only, with no tables or HTML.

@@ -1,7 +1,9 @@
 {
+  "effortLevel": "low",
+  "permissions": { "defaultMode": "auto" },
   "syncClaudeAiSkills": false,
   "syncClaudeAiPlugins": false,
-  "claudeMdExcludes": ["/home/*/.claude/**", "/Users/*/.claude/**"],
+  "claudeMdExcludes": ["{{HOME}}/.claude/**"],
   "skillOverrides": {
     "dataviz": "user-invocable-only",
     "claude-api": "user-invocable-only",

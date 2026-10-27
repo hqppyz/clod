@@ -1,9 +1,10 @@
-import { stat } from "node:fs/promises";
-import { join, relative } from "node:path";
-import { ConfigError, type AutoEntry, type PathConfig } from "./config";
+import { stat } from 'node:fs/promises';
+import { join, relative } from 'node:path';
+import type { Clod } from './clod';
+import { ConfigError } from './config';
 
 // Globs are relative to the entry's path; "." is the path itself.
-const SELF = ".";
+const SELF = '.';
 
 async function isDir(path: string): Promise<boolean> {
   try {
@@ -31,9 +32,9 @@ function excluded(rel: string, patterns: readonly string[]): boolean {
 // manual: the path itself. auto: include - exclude, where only a literal "."
 // matches the path itself and "*" matches direct children. Returns sorted
 // absolute paths.
-export async function resolveDirs(entry: PathConfig): Promise<string[]> {
+export async function resolveDirs(entry: Clod.Path): Promise<string[]> {
   if (!(await isDir(entry.path))) throw new ConfigError(`${entry.path}: not a directory`);
-  if (entry.mode === "manual") return [entry.path];
+  if (entry.mode === 'manual') return [entry.path];
 
   const rels = new Set<string>();
   for (const pattern of entry.include) {
@@ -47,7 +48,7 @@ export async function resolveDirs(entry: PathConfig): Promise<string[]> {
 }
 
 // Index of the first include pattern matching dir, used to order channels
-export function includeIndex(entry: AutoEntry, dir: string): number {
+export function includeIndex(entry: Clod.AutoPath, dir: string): number {
   const rel = relative(entry.path, dir) || SELF;
   const index = entry.include.findIndex((p) => (rel === SELF ? p === SELF : new Bun.Glob(p).match(rel)));
   return index === -1 ? entry.include.length : index;
