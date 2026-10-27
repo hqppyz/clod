@@ -7,7 +7,7 @@ paths:
       mode: auto # automatically manages creation and deletion of channels based off the parent directory
       category_id: '1234' # optional, channels go under this category
       include: # a glob or a list of globs; channels follow this order, "." is the path itself
-        - claude-home-bot
+        - clod
         - 'whatever'
   - /home/me/Documents:
       mode: auto # no category_id, so the channels go at the top of the server

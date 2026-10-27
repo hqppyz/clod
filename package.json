@@ -1,5 +1,5 @@
 {
-  "name": "claude-home-bot",
+  "name": "clod",
   "module": "index.ts",
   "type": "module",
   "private": true,

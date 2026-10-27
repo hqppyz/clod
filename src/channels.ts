@@ -38,16 +38,6 @@ export class ChannelDirs {
   }
 }
 
-// Earlier versions kept a managed channel's directory on this line of its topic
-const LEGACY_MARKER = "claude-home-bot:";
-
-// The directory on a legacy marker line, and the topic without that line
-export function legacyDir(topic: string | null): { dir?: string; topic: string } {
-  const lines = (topic ?? "").split("\n");
-  const marker = lines.find((l) => l.startsWith(LEGACY_MARKER));
-  return { dir: marker?.slice(LEGACY_MARKER.length).trim(), topic: lines.filter((l) => l !== marker).join("\n") };
-}
-
 // The status line the bot keeps as a channel's topic, found by its shape so
 // updating one part leaves the others alone. Lines of no known shape, like an
 // old format's, are dropped so the topic fixes itself.
@@ -119,7 +109,7 @@ export class CategorySync {
     const seen = new Set<string>();
     const unmanaged: TextChannel[] = [];
     for (const channel of this.textChannels()) {
-      const dir = this.dirs.get(channel.id) ?? (await this.migrate(channel));
+      const dir = this.dirs.get(channel.id);
       if (dir === undefined) {
         unmanaged.push(channel);
         continue;
@@ -156,16 +146,6 @@ export class CategorySync {
     }
 
     await this.order(wanted);
-  }
-
-  // Moves a legacy marker's directory out of the topic and into the store
-  private async migrate(channel: TextChannel): Promise<string | undefined> {
-    const { dir, topic } = legacyDir(channel.topic);
-    if (dir === undefined) return undefined;
-    this.dirs.set(channel.id, dir);
-    await channel.setTopic(topic);
-    console.log(`moved the directory of #${channel.name} out of its topic (${dir})`);
-    return dir;
   }
 
   // Managed channels take the slots managed channels already occupy, in wanted

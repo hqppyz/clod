@@ -1,4 +1,4 @@
-# claude-home-bot
+# clod
 
 Discord bot that gives each of your directories a channel with its own [Claude Code](https://claude.com/claude-code) session.
 
@@ -17,8 +17,8 @@ Needs [bun](https://bun.com) and the `claude` CLI on `PATH`.
 
    ```bash
    bun install
-   cp -r data ~/.claude-bot  # then edit ~/.claude-bot/config.yaml
-   bun run index.ts --data ~/.claude-bot
+   cp -r data ~/.clod  # then edit ~/.clod/config.yaml
+   bun run index.ts --data ~/.clod
    ```
 
 On first run the bot DMs the admins a link to log claude in.
@@ -29,7 +29,7 @@ Every config key can also come from the environment: `DISCORD_TOKEN`, `DISCORD_S
 
 ## CLAUDE.md
 
-If `<data>/CLAUDE.md` exists, the bot copies it to `<data>/.claude/CLAUDE.md` whenever a session starts, so Claude reads it as its user-level instructions. Edits Claude makes to the copy last until the next session. A symlink works, e.g. `ln -s ~/.claude/CLAUDE.md ~/.claude-bot/CLAUDE.md`. Without the file, no instructions are installed.
+If `<data>/CLAUDE.md` exists, the bot copies it to `<data>/.claude/CLAUDE.md` whenever a session starts, so Claude reads it as its user-level instructions. Edits Claude makes to the copy last until the next session. A symlink works, e.g. `ln -s ~/.claude/CLAUDE.md ~/.clod/CLAUDE.md`. Without the file, no instructions are installed.
 
 The copy fills in `{{DATA_DIR}}`, the data dir's absolute path, and `{{BOT_NAME}}`, the bot's Discord username. Other `{{...}}` stay as written.
 

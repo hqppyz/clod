@@ -15,7 +15,7 @@ import {
   type Message,
 } from "discord.js";
 import { pick } from "./ask";
-import { CategorySync, ChannelDirs, legacyDir } from "./channels";
+import { CategorySync, ChannelDirs } from "./channels";
 import { clean } from "./clean";
 import { authenticate } from "./auth";
 import { Chats } from "./chats";
@@ -82,8 +82,7 @@ export async function startBot(config: Config): Promise<never> {
     const dir = manual.get(channel.id);
     if (dir !== undefined) return dir;
     if (channel.type !== ChannelType.GuildText || !categories.has(channel.parentId)) return undefined;
-    // A legacy marker still counts until the first sync moves it into the store
-    return channelDirs.get(channel.id) ?? legacyDir(channel.topic).dir;
+    return channelDirs.get(channel.id);
   };
 
   const { promise: authed, resolve: authDone } = Promise.withResolvers<void>();
