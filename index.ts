@@ -54,5 +54,17 @@ try {
   console.error(`config error: ${e.message}`);
   process.exit(1);
 }
+// Disposing saves state and closes the connectors. The signal can come twice,
+// from the parent and from systemd or the terminal, so later ones are ignored
+let stopping = false;
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(signal, async () => {
+    if (stopping) return;
+    stopping = true;
+    console.log(`${signal}, stopping`);
+    await clod[Symbol.asyncDispose]().catch((e) => console.error('failed to stop cleanly:', e));
+    process.exit(0);
+  });
+}
 await using _ = clod;
 await clod.run();

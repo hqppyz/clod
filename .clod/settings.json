@@ -1,5 +1,4 @@
 {
-  "effortLevel": "low",
   "permissions": { "defaultMode": "auto" },
   "syncClaudeAiSkills": false,
   "syncClaudeAiPlugins": false,

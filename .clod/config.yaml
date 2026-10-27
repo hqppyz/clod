@@ -23,7 +23,7 @@ paths:
       args: ['--permission-mode', 'dontAsk'] # overrides settings.json's permissions.defaultMode; denies whatever is not pre-allowed
       env: # optional, merged over claude.env
         ANTHROPIC_MODEL: sonnet # instances here start on Sonnet; /model still changes it
-        CLAUDE_CODE_EFFORT_LEVEL: low # forces this effort; /effort can't change it. The default lives in settings.json's effortLevel
+        CLAUDE_CODE_EFFORT_LEVEL: low # forces this effort; /effort can't change it. The default is claude.args' --effort
       include:
         - '.' # Documents itself
         - '*' # every subdirectory
@@ -42,6 +42,8 @@ paths:
 
 claude:
   args: # optional, extra `claude` arguments for every instance
+    - --effort # the starting effort; /effort changes it until the instance restarts
+    - low
     - --disallowedTools # tools a Discord chat has no use for
     - ReportFindings
     - ListAgents

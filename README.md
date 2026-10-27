@@ -92,7 +92,7 @@ If `<data>/settings.json` exists, the bot merges it into `<data>/.claude/setting
 
 Its strings fill in `{{HOME}}`, your home directory. Other `{{...}}` stay as written.
 
-The default sets the effort with `effortLevel`, which `/effort` can change; a path forces one with `CLAUDE_CODE_EFFORT_LEVEL` in its `env`.
+The default effort is `--effort low` in `claude.args`; `/effort` changes it until the instance restarts. A path forces one with `CLAUDE_CODE_EFFORT_LEVEL` in its `env`.
 
 ## Trimmed instances
 
