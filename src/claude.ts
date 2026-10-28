@@ -135,6 +135,13 @@ export class Instance {
     return response?.session_url;
   }
 
+  // Sets the session's title, in claude.ai/code and the app too. A resumed
+  // session reattaches to its Remote Control session, which keeps the title
+  // it was created with until renamed.
+  async rename(title: string): Promise<void> {
+    await this.request({ subtype: 'rename_session', title, source: 'host' });
+  }
+
   close() {
     this.closed = true;
     this.proc.kill();

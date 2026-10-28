@@ -66,13 +66,14 @@ class Attachment implements Connector.Attachment {
   async lifecycle(event: Instance.Event): Promise<void> {
     switch (event.type) {
       case 'starting': {
-        event.options.args.push('--name', render(this.name, { NAME: basename(this.session.dir) }));
+        event.options.args.push('--name', this.title);
         const bullet = await this.clod.connectorBullet('remote-control', { CONNECTOR: this.id });
         if (bullet) event.options.prompts.push(bullet);
         return;
       }
       case 'started': {
         const url = await event.instance.remoteControl(true);
+        await event.instance.rename(this.title).catch((e) => console.error(`failed to rename ${this.session.dir}:`, e));
         console.log(`remote control for ${this.session.dir}: ${url}`);
         return;
       }
@@ -85,6 +86,10 @@ class Attachment implements Connector.Attachment {
         if (event.reason === 'exit') setTimeout(() => this.wake(), REWAKE_MS);
         return;
     }
+  }
+
+  private get title(): string {
+    return render(this.name, { NAME: basename(this.session.dir) });
   }
 
   // The app shows the instance's events itself
