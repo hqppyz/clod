@@ -2,27 +2,33 @@ import { join } from 'node:path';
 
 // Clod's own commands. Clod runs them instead of Claude, whichever
 // connector or client sends them, once the sender's side allows them.
-export type Command = { readonly name: 'restart' | 'reboot' | 'stop' };
+export type Command = { readonly name: keyof typeof Command.DESCRIPTIONS };
 
 // The Claude home gets a file per command, for the app's slash menu and
 // Discord's commands, and a hook that blocks them as prompts, so no model turn
 // starts. Clod reads the blocked prompt from the event claude emits instead.
 export namespace Command {
-  const NAMES = new Set<string>(['restart', 'reboot', 'stop']);
+  // The one list of commands; the files, the hook and parse all derive from it
+  export const DESCRIPTIONS = {
+    restart: "Restart this session's claude process; the conversation resumes",
+    reboot: 'Restart all of clod',
+    stop: 'Stop all of clod',
+  } as const;
 
   export function parse(text: string): Command | undefined {
-    const name = text.trim();
-    return name.startsWith('/') && NAMES.has(name.slice(1)) ? { name: name.slice(1) as Command['name'] } : undefined;
+    const prompt = text.trim();
+    const name = prompt.slice(1);
+    return prompt.startsWith('/') && Object.hasOwn(DESCRIPTIONS, name) ? { name: name as Command['name'] } : undefined;
   }
 
-  export const FILES: Readonly<Record<string, string>> = {
-    'restart.md': "---\ndescription: Restart this session's claude process; the conversation resumes\n---\nRun by clod.\n",
-    'reboot.md': '---\ndescription: Restart all of clod\n---\nRun by clod.\n',
-    'stop.md': '---\ndescription: Stop all of clod\n---\nRun by clod.\n',
-  };
+  export const FILES: Readonly<Record<string, string>> = Object.fromEntries(
+    Object.entries(DESCRIPTIONS).map(([name, description]) => [`${name}.md`, `---\ndescription: ${description}\n---\nRun by clod.\n`]),
+  );
 
-  // Matches the prompts parse takes, as the hook's stdin JSON has them
-  const PROMPT = String.raw`"prompt": *" */(restart|reboot|stop) *"`;
+  // Matches the prompts parse takes, as the hook's stdin JSON has them: the
+  // whitespace trim drops arrives as spaces or JSON escapes
+  const SPACE = String.raw`( |\\[nrtf])*`;
+  const PROMPT = String.raw`"prompt": *"${SPACE}/(${Object.keys(DESCRIPTIONS).join('|')})${SPACE}"`;
 
   export const SETTINGS = {
     hooks: {
