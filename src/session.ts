@@ -212,10 +212,14 @@ export class Session {
       const { content } = event.message;
       const text = typeof content === 'string' ? content : content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('\n');
       this.emit({ type: 'turn_start', from: undefined, text });
-      // Claude would take a command of the bot's own for a prompt, so its turn is cut short
-      const command = Command.parse(text);
-      if (command) {
-        instance.interrupt();
+    }
+    // A command of the bot's own never reaches the model, as the hook blocks
+    // it; the event saying so is the only place its prompt shows
+    if (event.type === 'system' && event.subtype === 'informational' && instance?.foreign) {
+      const text = Command.blocked(event.content);
+      const command = text === undefined ? undefined : Command.parse(text);
+      if (text !== undefined && command) {
+        this.emit({ type: 'turn_start', from: undefined, text });
         this.foreignCommand = this.command(command, this.allowForeign);
         return;
       }
@@ -369,6 +373,12 @@ export namespace Session {
     readonly model: string;
     readonly permissionMode: string;
   }
+  // A prompt a UserPromptSubmit hook blocked
+  export interface Blocked {
+    readonly type: 'system';
+    readonly subtype: 'informational';
+    readonly content: string;
+  }
   // Progress while Claude thinks
   export interface ThinkingTokens {
     readonly type: 'system';
@@ -443,6 +453,7 @@ export namespace Session {
   export type Event =
     | Init
     | ThinkingTokens
+    | Blocked
     | Message
     | Result
     | RateLimit
@@ -478,6 +489,7 @@ export namespace Session {
     if (typeof event !== 'object' || event === null) return undefined;
     const name = event.subtype ? `${event.type}/${event.subtype}` : String(event.type);
     if (event.type === 'system' && (event.subtype === 'init' || event.subtype === 'thinking_tokens')) return event;
+    if (event.type === 'system' && event.subtype === 'informational' && event.prompt_submit_outcome?.kind === 'blocked_by_hook') return event;
     if (!KNOWN.has(event.type)) return { type: 'raw', name, line };
     if ((event.type === 'assistant' || event.type === 'user') && Array.isArray(event.message?.content)) {
       const content = event.message.content.map((b: any) => (BLOCKS.has(b?.type) ? b : { type: 'raw', name: String(b?.type) }));

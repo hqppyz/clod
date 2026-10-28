@@ -1,6 +1,5 @@
 import {
   ActionRowBuilder,
-  ApplicationCommandOptionType,
   ButtonBuilder,
   ButtonStyle,
   Client,
@@ -33,23 +32,7 @@ import { snowflake, snowflakes } from './config';
 // The bot's own command: empties the channel, then starts the conversation over
 const CLEAN = { name: 'clean', description: 'Delete every message in this channel, then /clear the conversation' };
 
-// The bot's own command: a new claude process for the channel, or a new bot process
-const RESTART = {
-  name: 'restart',
-  description: "Restart this channel's Claude instance, or the whole bot",
-  options: [
-    {
-      type: ApplicationCommandOptionType.String as const,
-      name: 'what',
-      description: 'instance or bot',
-      required: true,
-      choices: ['instance', 'bot'].map((c) => ({ name: c, value: c })),
-    },
-  ],
-};
-
-// The bot's own command: exits the bot for good, once its button confirms it
-const STOP = { name: 'stop', description: 'Stop the whole bot' };
+// /stop's button, which allow waits for
 const STOP_BUTTON = 'stop:confirm';
 // How long the button waits for its click
 const STOP_CONFIRM_MS = 60_000;
@@ -216,7 +199,7 @@ export class Discord implements Connector {
       .then(async () => {
         const listed = await Instance.commands(this.clod.config.dataDir, this.clod.home);
         const found = suggestionsOf(listed);
-        const registered = toDiscord(listed.commands, [CLEAN, RESTART, STOP], found);
+        const registered = toDiscord(listed.commands, [CLEAN], found);
         await this.guild.commands.set(registered.data);
         this.commands = registered.names;
         this.suggestions = found;
@@ -288,13 +271,6 @@ export class Discord implements Connector {
       console.log(`cleaned ${deleted} message(s) in ${dir}${left ? `, ${left} left` : ''}`);
       if (left) await interaction.followUp(`${left} message(s) couldn't be deleted.`);
       chat.add([{ interaction, prompt: '/clear' }]);
-      return;
-    }
-    // The bot's own commands; Clod runs them once allow allows them
-    if (interaction.commandName === RESTART.name || interaction.commandName === STOP.name) {
-      const prompt = interaction.commandName === STOP.name ? '/stop' : `/restart ${interaction.options.getString('what')}`;
-      await interaction.deferReply();
-      chat.add([{ interaction, prompt }]);
       return;
     }
     const command = this.commands.get(interaction.commandName);

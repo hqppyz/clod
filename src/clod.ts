@@ -2,7 +2,7 @@ import { mkdir, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Instance } from './claude';
-import type { Command } from './command';
+import { Command } from './command';
 import { ConfigError, entryFor } from './config';
 import { FACTORIES, type Connector } from './connectors';
 import { Session } from './session';
@@ -159,6 +159,18 @@ export class Clod implements AsyncDisposable {
   async install(): Promise<void> {
     await this.installClaudeMd();
     await this.installSettings();
+    await this.installCommands();
+  }
+
+  // The bot's own commands, as files claude lists and settings whose hook
+  // keeps them from reaching the model; optionsFor passes the settings
+  private async installCommands(): Promise<void> {
+    for (const [name, text] of Object.entries(Command.FILES)) await Bun.write(join(this.home, 'commands', name), text);
+    await Bun.write(this.commandSettings, `${JSON.stringify(Command.SETTINGS, null, 2)}\n`);
+  }
+
+  private get commandSettings(): string {
+    return join(this.home, 'clod-settings.json');
   }
 
   // Copies <data>/CLAUDE.md, if there is one, into the Claude home, where Claude
@@ -209,7 +221,7 @@ export class Clod implements AsyncDisposable {
   optionsFor(dir: string): Instance.Options {
     const entry = entryFor(this.config, dir);
     return {
-      args: [...this.config.claude.args, ...(entry?.args ?? [])],
+      args: ['--settings', this.commandSettings, ...this.config.claude.args, ...(entry?.args ?? [])],
       env: { ...this.config.claude.env, ...entry?.env },
       prompts: [],
     };
@@ -307,17 +319,17 @@ export class Clod implements AsyncDisposable {
 
   // Runs a command of the bot's own, sent in session and allowed already
   command(command: Command, session: Session): Session.Reply {
-    if (command.name === 'restart' && command.what === 'instance') {
+    if (command.name === 'restart') {
       session.restart();
       console.log(`restarted the instance in ${session.dir}`);
       return { text: 'Instance restarted; the next message resumes the session.', isError: false };
     }
-    const restart = command.name === 'restart';
-    console.log(`${restart ? 'restart' : 'stop'} of the bot from ${session.dir}`);
+    const restart = command.name === 'reboot';
+    console.log(`${restart ? 'reboot' : 'stop'} of clod from ${session.dir}`);
     // Exit code 0, so index.ts doesn't start a new process
     if (!this.exiting) setTimeout(() => this.exit(restart ? Clod.RESTART_CODE : 0), EXIT_GRACE_MS);
     this.exiting = true;
-    return { text: restart ? 'Restarting the bot…' : 'Stopping the bot…', isError: false };
+    return { text: restart ? 'Rebooting clod…' : 'Stopping clod…', isError: false };
   }
 
   private async exit(code: number) {

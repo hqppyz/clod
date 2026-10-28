@@ -59,17 +59,18 @@ A single server bot: manual paths link an existing channel, auto paths get a cha
 
 Create a bot in the [Developer Portal](https://discord.com/developers/applications).<br>Turn on **Message Content Intent**. <br>Invite it with the `bot` and `applications.commands` scopes and the `View Channels`, `Send Messages`, `Read Message History`, `Manage Channels`, `Manage Messages` and `Manage Roles` permissions.<br>Keep the bot's role above its `<name>-usage` role, or it can't give that role to itself.
 
-Claude's slash commands work as Discord commands. The bot adds three, for admins only:
+Claude's slash commands work as Discord commands. The bot adds four, for admins only:
 
 - `/clean`: delete every message in the channel and clear the conversation
-- `/restart instance|bot`: restart the channel's Claude instance, or the whole bot
-- `/stop`: stop the whole bot, after a confirmation button
+- `/restart`: restart the channel's claude process; the conversation resumes
+- `/reboot`: restart all of clod
+- `/stop`: stop all of clod, after a confirmation button
 
-`/restart` and `/stop` only run as Discord commands; typed as messages, they're refused.
+`/restart`, `/reboot` and `/stop` only run as Discord commands; typed as messages, they're refused.
 
 ### Remote Control
 
-Sessions show up in claude.ai/code and the Claude app. Typing `/restart`, `/restart bot` or `/stop` there runs the bot's own command, without confirmation, as the app is the account owner's.
+Sessions show up in claude.ai/code and the Claude app. Typing `/restart`, `/reboot` or `/stop` there runs clod's own command, without confirmation, as the app is the account owner's.
 
 ## CLAUDE.md
 
@@ -94,7 +95,7 @@ If `<data>/settings.json` exists, the bot merges it into `<data>/.claude/setting
 
 Its strings fill in `{{HOME}}`, your home directory. Other `{{...}}` stay as written.
 
-The default effort is `--effort low` in `claude.args`; `/effort` changes it until the instance restarts. A path forces one with `CLAUDE_CODE_EFFORT_LEVEL` in its `env`.
+The default effort is `--effort low` in `claude.args`; `/effort` changes it for the conversation, which keeps it across restarts until `/clear`. A path forces one with `CLAUDE_CODE_EFFORT_LEVEL` in its `env`.
 
 ## Trimmed instances
 
