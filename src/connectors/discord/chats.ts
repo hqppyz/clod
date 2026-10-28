@@ -9,6 +9,7 @@ import { Asking } from './ask';
 import { Permitting } from './permit';
 import { showUsage } from './presence';
 import { withStatus, type Status } from './channels';
+import { clean } from './clean';
 import { LiveReply, prompt, type Outlet } from './log';
 
 // Discord allows two topic changes per 10 minutes per channel
@@ -31,6 +32,9 @@ export interface Command {
 }
 
 type Input = Message | Command;
+
+// Claude's /clear, which empties the channel too
+const CLEAR = /^\/clear(\s|$)/;
 
 const idOf = (input: Input) => (input instanceof Message ? input.id : input.interaction.id);
 
@@ -190,6 +194,8 @@ export class Chat implements Connector.Attachment {
   private draining = false;
   // The turn this channel is sending, set up before the session starts it
   private live: Live | undefined;
+  // Whether the turn so far is a /clear, which empties the channel once answered
+  private cleared = false;
   // The turn the session is running, this channel's or not
   private current: Live | undefined;
 
@@ -231,6 +237,13 @@ export class Chat implements Connector.Attachment {
       const id = idOf(input);
       if (this.seen.has(id) || (last && BigInt(id) <= BigInt(last))) continue;
       this.seen.add(id);
+      // /clear also empties the channel, so it's for admins even without admin-only
+      const [text, user] = input instanceof Message ? [input.content, input.author.id] : [input.prompt, input.interaction.user.id];
+      if (CLEAR.test(text) && !this.discord.adminIds.includes(user)) {
+        const refused = input instanceof Message ? input.reply('Only admins can use /clear.') : input.interaction.editReply('Only admins can use /clear.');
+        refused.catch((e) => console.error('failed to refuse /clear:', e));
+        continue;
+      }
       // The bot's own commands run at once, even during a turn
       if (!(input instanceof Message) && Own.parse(input.prompt)) {
         this.own(input).catch((e) => console.error(`${input.prompt} in ${this.session.dir} failed:`, e));
@@ -268,7 +281,12 @@ export class Chat implements Connector.Attachment {
       // This channel's own turn finishes in drain, with the reply it awaits
       if (!current || current === this.live) return;
       current.typing.set(false);
-      current.reply.finish(event.reply).catch((e) => console.error(`failed to show a turn in ${this.session.dir}:`, e));
+      const cleared = this.cleared;
+      this.cleared = false;
+      current.reply
+        .finish(event.reply)
+        .then(() => (cleared ? this.wipe([current.reply]) : undefined))
+        .catch((e) => console.error(`failed to show a turn in ${this.session.dir}:`, e));
       return;
     }
     if (!channel) return;
@@ -276,6 +294,7 @@ export class Chat implements Connector.Attachment {
       this.topic.update(channel, Session.status(event));
     }
     if (event.type === 'result') {
+      if (event.local_command === 'clear') this.cleared = true;
       const effort = Session.effortSet(event);
       if (effort) this.topic.update(channel, { effort });
       const cost = Session.cost(event);
@@ -315,6 +334,15 @@ export class Chat implements Connector.Attachment {
     await interaction.editReply({ content: reply.text, components: [] });
   }
 
+  // A /clear from any client empties the channel too, all but the reply to it
+  private async wipe(replies: readonly LiveReply[]) {
+    const channel = this.guild.channels.cache.get(this.channelId);
+    if (!channel?.isTextBased() || channel.isDMBased()) return;
+    const { deleted, left } = await clean(channel, new Set(replies.flatMap((r) => r.messageIds())));
+    console.log(`cleaned ${deleted} message(s) in ${this.session.dir}${left ? `, ${left} left` : ''}`);
+    if (left) await channel.send(`${left} message(s) couldn't be deleted.`);
+  }
+
   private channel(): SendableChannels | undefined {
     const channel = this.guild.channels.cache.get(this.channelId);
     return channel?.isSendable() ? channel : undefined;
@@ -346,8 +374,13 @@ export class Chat implements Connector.Attachment {
               this.asking = undefined;
             }
           };
+          this.cleared = false;
           const reply = await this.session.prompt(merge(batch), this.discord, { ask });
           await live.reply.finish(reply);
+          if (this.cleared) {
+            this.cleared = false;
+            await this.wipe([live.reply]);
+          }
         } finally {
           typing.set(false);
           if (this.current === live) this.current = undefined;

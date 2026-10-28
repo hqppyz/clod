@@ -224,6 +224,11 @@ export class LiveReply {
     await this.flushing;
   }
 
+  // The ids of the messages sent so far
+  messageIds(): string[] {
+    return this.messages.map((m) => m.id);
+  }
+
   // Resolves once every message is up to date, for when later output goes elsewhere
   async settle() {
     while (this.flushing) await this.flushing;

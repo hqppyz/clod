@@ -59,9 +59,8 @@ A single server bot: manual paths link an existing channel, auto paths get a cha
 
 Create a bot in the [Developer Portal](https://discord.com/developers/applications).<br>Turn on **Message Content Intent**. <br>Invite it with the `bot` and `applications.commands` scopes and the `View Channels`, `Send Messages`, `Read Message History`, `Manage Channels`, `Manage Messages` and `Manage Roles` permissions.<br>Keep the bot's role above its `<name>-usage` role, or it can't give that role to itself.
 
-Claude's slash commands work as Discord commands. The bot adds four, for admins only:
+Claude's slash commands work as Discord commands. `/clear`, from any client, also deletes every message in the channel but its reply; from Discord, only admins can use it. The bot adds three, for admins only:
 
-- `/clean`: delete every message in the channel and clear the conversation
 - `/restart`: restart the channel's claude process; the conversation resumes
 - `/reboot`: restart all of clod
 - `/stop`: stop all of clod, after a confirmation button

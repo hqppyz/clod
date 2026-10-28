@@ -25,12 +25,8 @@ import { LoginMessages } from './auth';
 import { decide, isPermitButton } from './permit';
 import { CategorySync, ChannelDirs } from './channels';
 import { Chat, Chats } from './chats';
-import { clean } from './clean';
 import { promptOf, suggest, suggestionsOf, toDiscord, type Registered, type Suggestions } from './commands';
 import { snowflake, snowflakes } from './config';
-
-// The bot's own command: empties the channel, then starts the conversation over
-const CLEAN = { name: 'clean', description: 'Delete every message in this channel, then /clear the conversation' };
 
 // /stop's button, which allow waits for
 const STOP_BUTTON = 'stop:confirm';
@@ -70,7 +66,7 @@ export class Discord implements Connector {
     private readonly clod: Clod,
     private readonly client: Client<true>,
     private readonly guild: Guild,
-    private readonly adminIds: readonly string[],
+    readonly adminIds: readonly string[],
     private readonly adminOnly: boolean,
     private readonly channelDirs: ChannelDirs,
     private readonly chats: Chats,
@@ -199,7 +195,7 @@ export class Discord implements Connector {
       .then(async () => {
         const listed = await Instance.commands(this.clod.config.dataDir, this.clod.home);
         const found = suggestionsOf(listed);
-        const registered = toDiscord(listed.commands, [CLEAN], found);
+        const registered = toDiscord(listed.commands, [], found);
         await this.guild.commands.set(registered.data);
         this.commands = registered.names;
         this.suggestions = found;
@@ -254,25 +250,6 @@ export class Discord implements Connector {
 
   private async runCommand(interaction: ChatInputCommandInteraction, chat: Chat) {
     const dir = chat.session.dir;
-    // /clean wipes the channel, so it's for admins even without admin-only
-    if (interaction.commandName === CLEAN.name && !this.adminIds.includes(interaction.user.id)) {
-      await interaction.reply({ content: `Only admins can use /${interaction.commandName}.`, flags: MessageFlags.Ephemeral });
-      return;
-    }
-    if (interaction.commandName === CLEAN.name && interaction.inGuild() && interaction.channel) {
-      // The reply stays, as /clear's answer goes into it
-      const reply = await interaction.deferReply({ withResponse: true });
-      const cleaned = await clean(interaction.channel, reply.resource?.message?.id).catch(async (e) => {
-        console.error(`failed to clean ${dir}:`, e);
-        await interaction.editReply(`Couldn't clean the channel: ${e instanceof Error ? e.message : e}`);
-      });
-      if (!cleaned) return;
-      const { deleted, left } = cleaned;
-      console.log(`cleaned ${deleted} message(s) in ${dir}${left ? `, ${left} left` : ''}`);
-      if (left) await interaction.followUp(`${left} message(s) couldn't be deleted.`);
-      chat.add([{ interaction, prompt: '/clear' }]);
-      return;
-    }
     const command = this.commands.get(interaction.commandName);
     if (command === undefined) {
       await interaction.reply({ content: 'Unknown command.', flags: MessageFlags.Ephemeral });
