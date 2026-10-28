@@ -100,6 +100,11 @@ class Attachment implements Connector.Attachment {
     return new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('answered elsewhere')), { once: true }));
   }
 
+  // Commands from the app come from the account's owner
+  async allow(): Promise<Session.Decision> {
+    return { behavior: 'allow' };
+  }
+
   // Not awaited, as starting waits for every attachment to be made, this one included
   wake() {
     if (this.disposed) return;

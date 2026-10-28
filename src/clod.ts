@@ -2,6 +2,7 @@ import { mkdir, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Instance } from './claude';
+import type { Command } from './command';
 import { ConfigError, entryFor } from './config';
 import { FACTORIES, type Connector } from './connectors';
 import { Session } from './session';
@@ -33,6 +34,9 @@ function mergePatch(target: unknown, patch: unknown): unknown {
   return result;
 }
 
+// Waited before the bot exits on a command, so connectors can show its reply
+const EXIT_GRACE_MS = 2_000;
+
 // The bot: its sessions, one per directory, and the connectors serving them.
 // Connectors reach the rest of the bot through it.
 export class Clod implements AsyncDisposable {
@@ -47,18 +51,21 @@ export class Clod implements AsyncDisposable {
   // Which path each attachment was made by, to redo it if that changes
   private readonly attachedBy = new Map<Connector.Attachment, Connector.Path>();
   private writing: Promise<unknown> = Promise.resolve();
+  private exiting = false;
 
   private constructor(
     readonly config: Clod.Config,
-    // Session ids by directory, from <data>/sessions.json
-    private readonly saved: Map<string, string>,
+    // Sessions by directory, from <data>/sessions.json
+    private readonly saved: Map<string, Session.Saved>,
   ) {}
 
   // Resolves with every enabled connector created, or throws, disposing the ones made so far
   static async create(config: Clod.Config): Promise<Clod> {
     const file = Bun.file(join(config.dataDir, 'sessions.json'));
-    const saved: Record<string, string> = (await file.exists()) ? await file.json() : {};
-    const clod = new Clod(config, new Map(Object.entries(saved)));
+    const saved: Record<string, string | Session.Saved> = (await file.exists()) ? await file.json() : {};
+    // A bare id is how sessions were saved before the model and effort were
+    const sessions = Object.entries(saved).map(([dir, s]): [string, Session.Saved] => [dir, typeof s === 'string' ? { id: s } : s]);
+    const clod = new Clod(config, new Map(sessions));
     try {
       for (const [id, { type, enabled, raw }] of Object.entries(config.connectors)) {
         if (!enabled) continue;
@@ -209,7 +216,7 @@ export class Clod implements AsyncDisposable {
   }
 
   save(session: Session) {
-    if (session.id) this.saved.set(session.dir, session.id);
+    if (session.id) this.saved.set(session.dir, { id: session.id, ...session.chosen });
     else this.saved.delete(session.dir);
     const json = JSON.stringify(Object.fromEntries(this.saved), null, 2);
     const path = join(this.config.dataDir, 'sessions.json');
@@ -296,6 +303,26 @@ export class Clod implements AsyncDisposable {
         }
       }
     }
+  }
+
+  // Runs a command of the bot's own, sent in session and allowed already
+  command(command: Command, session: Session): Session.Reply {
+    if (command.name === 'restart' && command.what === 'instance') {
+      session.restart();
+      console.log(`restarted the instance in ${session.dir}`);
+      return { text: 'Instance restarted; the next message resumes the session.', isError: false };
+    }
+    const restart = command.name === 'restart';
+    console.log(`${restart ? 'restart' : 'stop'} of the bot from ${session.dir}`);
+    // Exit code 0, so index.ts doesn't start a new process
+    if (!this.exiting) setTimeout(() => this.exit(restart ? Clod.RESTART_CODE : 0), EXIT_GRACE_MS);
+    this.exiting = true;
+    return { text: restart ? 'Restarting the bot…' : 'Stopping the bot…', isError: false };
+  }
+
+  private async exit(code: number) {
+    await this[Symbol.asyncDispose]().catch((e) => console.error('failed to stop cleanly:', e));
+    process.exit(code);
   }
 
   // Ends every running instance, as before the bot exits

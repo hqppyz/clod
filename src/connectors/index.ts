@@ -1,5 +1,6 @@
 import type { Instance } from '../claude';
 import type { Clod } from '../clod';
+import type { Command } from '../command';
 import type { Session } from '../session';
 import { Discord } from './discord';
 import { RemoteControl } from './remote-control';
@@ -46,6 +47,11 @@ export namespace Connector {
     // to leave it to others. Every attachment that has it is asked; the first
     // answer wins and aborts the signal for the rest.
     permit?(permission: Session.Permission, signal: AbortSignal): Promise<Session.Decision>;
+
+    // A command of the bot's own that another client sent, like the Claude
+    // app: whether it may run. Every attachment that has it is asked; the
+    // first answer wins. Connectors allow their own commands per turn instead.
+    allow?(command: Command): Promise<Session.Decision>;
   }
 }
 

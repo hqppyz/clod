@@ -1,5 +1,6 @@
 import { Instance } from './claude';
 import type { Clod } from './clod';
+import { Command } from './command';
 import type { Connector } from './connectors';
 
 // An instance with no turn for this long is asked to stop; the next turn resumes the session
@@ -13,6 +14,9 @@ type Reason = Extract<Instance.Event, { type: 'stopped' }>['reason'];
 export class Session {
   // Claude's session id; changes on /clear or a failed resume
   id: string | undefined;
+  // The model and effort chosen in the conversation, which claude doesn't
+  // keep, so a resume passes them on; a new conversation starts without
+  chosen: Session.Chosen;
   // The connectors serving it, each through its attachment; Clod keeps it up to date
   readonly attachments = new Map<Connector, Connector.Attachment>();
   private running: Instance | undefined;
@@ -27,13 +31,16 @@ export class Session {
   private waiting: Session.Turn | undefined;
   // A foreign turn's result, shown once its command completes
   private foreignReply: Session.Reply | undefined;
+  // A foreign turn that is a command of the bot's own; resolves to its reply
+  private foreignCommand: Promise<Session.Reply> | undefined;
 
   constructor(
     private readonly clod: Clod,
     readonly dir: string,
-    id?: string,
+    { id, ...chosen }: Session.Saved = {},
   ) {
     this.id = id;
+    this.chosen = chosen;
   }
 
   get instance(): Instance | undefined {
@@ -42,8 +49,11 @@ export class Session {
 
   // Runs text as a turn. from's id tags the prompt, but not a slash command,
   // which has to come first; ask answers the turn's AskUserQuestion calls, for
-  // the connector that sent it.
-  prompt(text: string, from: Connector, ask?: Session.Ask): Promise<Session.Reply> {
+  // the connector that sent it. A command of the bot's own skips the queue and
+  // runs once allow allows it; without allow it's refused.
+  prompt(text: string, from: Connector, { ask, allow }: Session.Handlers = {}): Promise<Session.Reply> {
+    const command = Command.parse(text);
+    if (command) return this.command(command, allow);
     const turn = this.queue.then(() => this.turn(text, from, ask));
     this.queue = turn.catch(() => {});
     return turn;
@@ -78,6 +88,22 @@ export class Session {
     this.running.close();
   }
 
+  // Runs a command of the bot's own, once its sender's side allows it
+  private async command(command: Command, allow: Session.Allow | undefined): Promise<Session.Reply> {
+    const failed = (e: unknown): Session.Decision => ({ behavior: 'deny', message: `/${command.name} failed: ${e instanceof Error ? e.message : e}` });
+    const decision = allow ? await allow(command).catch(failed) : { behavior: 'deny' as const, message: `/${command.name} can't be run from here.` };
+    if (decision.behavior === 'deny') return { text: decision.message, isError: true };
+    return this.clod.command(command, this);
+  }
+
+  // A command another client sent goes to every connector that can allow
+  // it; the first answer wins
+  private readonly allowForeign: Session.Allow = (command) => {
+    const allowing = [...this.attachments.values()].flatMap((a) => (a.allow ? [a.allow(command)] : []));
+    if (allowing.length === 0) return Promise.resolve({ behavior: 'deny', message: `No connector allows /${command.name} from here.` });
+    return Promise.any(allowing);
+  };
+
   private async turn(text: string, from: Connector, ask?: Session.Ask): Promise<Session.Reply> {
     const instance = await this.launch();
     clearTimeout(this.idle);
@@ -92,8 +118,6 @@ export class Session {
       await instance.exited;
       if (instance.resumeFailed) return this.turn(text, from, ask);
     }
-    this.id = instance.sessionId ?? this.id;
-    this.clod.save(this);
     this.rest();
     return reply;
   }
@@ -110,6 +134,8 @@ export class Session {
     await this.clod.install();
     const options = this.clod.optionsFor(this.dir);
     await this.lifecycle({ type: 'starting', options }, true);
+    if (this.id && this.chosen.model) options.args.push('--model', this.chosen.model);
+    if (this.id && this.chosen.effort) options.args.push('--effort', this.chosen.effort);
     const prompt = await this.clod.connectorsPrompt(options.prompts);
     if (prompt) options.args.push('--append-system-prompt', prompt);
     const instance = (this.running = await Instance.start(this.dir, this.clod.home, options, { event: (event) => this.read(event), permit: (permission, signal) => this.permit(permission, signal) }, this.id));
@@ -129,10 +155,16 @@ export class Session {
     if (instance.resumeFailed) {
       console.error(`session in ${this.dir} could not resume, starting over`);
       this.id = undefined;
+      this.chosen = {};
       this.clod.save(this);
     }
-    // A foreign turn cut short ends here, as its command never completes
-    if (instance.foreign) this.emit({ type: 'turn_end', reply: { text: 'claude exited', isError: true } });
+    // A foreign turn cut short ends here, as its command never completes;
+    // one restarting the instance is cut short by its own doing
+    if (instance.foreign) {
+      const command = this.foreignCommand;
+      this.foreignCommand = undefined;
+      this.emit({ type: 'turn_end', reply: command ? await command : { text: 'claude exited', isError: true } });
+    }
     await this.lifecycle({ type: 'stopped', reason });
   }
 
@@ -166,24 +198,58 @@ export class Session {
   // is the replayed user message with the command's uuid.
   private read(event: Session.Event) {
     const instance = this.running;
+    // Kept up to date on every event, as a /clear sent from another client
+    // starts a new conversation without a turn of ours to save it
+    if (instance?.sessionId && instance.sessionId !== this.id) {
+      if (this.id) this.chosen = {};
+      this.id = instance.sessionId;
+      this.clod.save(this);
+    }
+    // /model and /effort are the turns that change them
+    if (instance && event.type === 'result' && (event.local_command === 'model' || event.local_command === 'effort')) this.choose(instance);
     if (event.type === 'command_lifecycle' && event.state === 'started') clearTimeout(this.idle);
     if (event.type === 'user' && event.isReplay && instance?.foreign && event.uuid === instance.foreign) {
       const { content } = event.message;
       const text = typeof content === 'string' ? content : content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('\n');
       this.emit({ type: 'turn_start', from: undefined, text });
+      // Claude would take a command of the bot's own for a prompt, so its turn is cut short
+      const command = Command.parse(text);
+      if (command) {
+        instance.interrupt();
+        this.foreignCommand = this.command(command, this.allowForeign);
+        return;
+      }
     }
+    // The rest of a foreign command's turn is Claude's answer to it, which nobody needs
+    const completed = event.type === 'command_lifecycle' && event.state === 'completed';
+    if (this.foreignCommand && instance?.foreign && !completed) return;
     // An interrupted turn ends in an error that only carries diagnostics
     if (event.type === 'result' && instance?.foreign) this.foreignReply = instance.interrupted ? { text: 'Interrupted.', isError: false } : Session.reply(event);
     this.emit(event);
-    if (event.type === 'command_lifecycle' && event.state === 'completed') {
-      this.emit({ type: 'turn_end', reply: this.foreignReply ?? { text: '', isError: false } });
-      this.foreignReply = undefined;
-      if (this.waiting) this.emit(this.waiting);
-      this.waiting = undefined;
-      this.rest();
+    if (completed) {
+      const command = this.foreignCommand;
+      this.foreignCommand = undefined;
+      if (command) command.then((reply) => this.endForeign(reply));
+      else this.endForeign(this.foreignReply ?? { text: '', isError: false });
     }
     // Our own turn ends with its result, while the next event can still be a foreign turn's
     if (event.type === 'result' && !instance?.foreign) this.emit({ type: 'turn_end', reply: Session.reply(event) });
+  }
+
+  // Saves the model and effort the instance runs with now
+  private async choose(instance: Instance) {
+    const { model, effort } = await instance.settings().catch(() => ({ model: undefined, effort: undefined }));
+    this.chosen = { model, effort };
+    this.clod.save(this);
+  }
+
+  // A foreign turn's end, then the turn of ours waiting for it starts
+  private endForeign(reply: Session.Reply) {
+    this.emit({ type: 'turn_end', reply });
+    this.foreignReply = undefined;
+    if (this.waiting) this.emit(this.waiting);
+    this.waiting = undefined;
+    this.rest();
   }
 
   // A tool call the mode didn't approve goes to every connector that can
@@ -226,6 +292,26 @@ export namespace Session {
   // Asks the person the questions; resolves to each question's answer, keyed by
   // its text. The signal aborts when Claude stops waiting for the answers.
   export type Ask = (questions: readonly Question[], signal: AbortSignal) => Promise<Record<string, string>>;
+
+  // Whether the sender may run a command of the bot's own, like asking an
+  // admin to confirm; a deny's message is the command's reply
+  export interface Chosen {
+    readonly model?: string;
+    readonly effort?: string;
+  }
+
+  // A session as <data>/sessions.json keeps it
+  export interface Saved extends Chosen {
+    readonly id?: string;
+  }
+
+  export type Allow = (command: Command) => Promise<Decision>;
+
+  // What answers a turn's requests, for the connector that sent it
+  export interface Handlers {
+    readonly ask?: Ask;
+    readonly allow?: Allow;
+  }
 
   // A turn starting or ending, around its events. from is the connector that
   // sent it, or undefined for one another client sent, like the Claude app.

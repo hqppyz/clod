@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { Message, type ChatInputCommandInteraction, type Guild, type SendableChannels } from 'discord.js';
 import type { Instance } from '../../claude';
+import { Command as Own } from '../../command';
 import { Session } from '../../session';
 import type { Connector } from '..';
 import type { Discord, Path } from '.';
@@ -230,6 +231,11 @@ export class Chat implements Connector.Attachment {
       const id = idOf(input);
       if (this.seen.has(id) || (last && BigInt(id) <= BigInt(last))) continue;
       this.seen.add(id);
+      // The bot's own commands run at once, even during a turn
+      if (!(input instanceof Message) && Own.parse(input.prompt)) {
+        this.own(input).catch((e) => console.error(`${input.prompt} in ${this.session.dir} failed:`, e));
+        continue;
+      }
       if (this.asking && input instanceof Message) {
         this.asking.type(input.content);
         continue;
@@ -300,6 +306,15 @@ export class Chat implements Connector.Attachment {
     }
   }
 
+  // A command of the bot's own, which answers its deferred reply. Only
+  // slash commands are allowed; typed out, it's refused, so messages caught
+  // up on after downtime can't restart or stop the bot.
+  private async own(command: Command) {
+    const { interaction } = command;
+    const reply = await this.session.prompt(command.prompt, this.discord, { allow: (own) => this.discord.allow(interaction, own) });
+    await interaction.editReply({ content: reply.text, components: [] });
+  }
+
   private channel(): SendableChannels | undefined {
     const channel = this.guild.channels.cache.get(this.channelId);
     return channel?.isSendable() ? channel : undefined;
@@ -331,7 +346,7 @@ export class Chat implements Connector.Attachment {
               this.asking = undefined;
             }
           };
-          const reply = await this.session.prompt(merge(batch), this.discord, ask);
+          const reply = await this.session.prompt(merge(batch), this.discord, { ask });
           await live.reply.finish(reply);
         } finally {
           typing.set(false);

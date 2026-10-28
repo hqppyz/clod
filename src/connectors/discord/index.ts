@@ -4,18 +4,19 @@ import {
   ButtonBuilder,
   ButtonStyle,
   Client,
+  ComponentType,
   DiscordAPIError,
   Events,
   GatewayIntentBits,
   MessageFlags,
   RESTJSONErrorCodes,
-  type ButtonInteraction,
   type ChatInputCommandInteraction,
   type Guild,
   type Message,
 } from 'discord.js';
 import { Instance } from '../../claude';
-import { Clod } from '../../clod';
+import type { Clod } from '../../clod';
+import type { Command } from '../../command';
 import { bool, checkKeys, str } from '../../config';
 import { includeIndex } from '../../dirs';
 import type { Session } from '../../session';
@@ -50,6 +51,8 @@ const RESTART = {
 // The bot's own command: exits the bot for good, once its button confirms it
 const STOP = { name: 'stop', description: 'Stop the whole bot' };
 const STOP_BUTTON = 'stop:confirm';
+// How long the button waits for its click
+const STOP_CONFIRM_MS = 60_000;
 
 // One path entry served, as its block says
 export class Path implements Connector.Path {
@@ -256,9 +259,6 @@ export class Discord implements Connector {
         if (this.adminIds.includes(interaction.user.id)) decide(interaction);
         else interaction.reply({ content: 'Only admins can approve tool calls.', flags: MessageFlags.Ephemeral }).catch(() => {});
       }
-      if (interaction.isButton() && interaction.customId === STOP_BUTTON) {
-        this.stop(interaction).catch((e) => console.error('stop failed:', e));
-      }
       if (interaction.isAutocomplete()) {
         const { name, value } = interaction.options.getFocused(true);
         interaction.respond(suggest(this.suggestions[name] ?? [], value)).catch(() => {});
@@ -271,18 +271,9 @@ export class Discord implements Connector {
 
   private async runCommand(interaction: ChatInputCommandInteraction, chat: Chat) {
     const dir = chat.session.dir;
-    // The bot's own commands wipe, restart or stop things, so they're for admins even without admin-only
-    const own = [CLEAN.name, RESTART.name, STOP.name].includes(interaction.commandName);
-    if (own && !this.adminIds.includes(interaction.user.id)) {
+    // /clean wipes the channel, so it's for admins even without admin-only
+    if (interaction.commandName === CLEAN.name && !this.adminIds.includes(interaction.user.id)) {
       await interaction.reply({ content: `Only admins can use /${interaction.commandName}.`, flags: MessageFlags.Ephemeral });
-      return;
-    }
-    if (interaction.commandName === STOP.name) {
-      const confirm = new ButtonBuilder().setCustomId(STOP_BUTTON).setLabel('Stop the bot').setStyle(ButtonStyle.Danger);
-      await interaction.reply({
-        content: 'This stops the whole bot until someone starts it again.',
-        components: [new ActionRowBuilder<ButtonBuilder>().addComponents(confirm)],
-      });
       return;
     }
     if (interaction.commandName === CLEAN.name && interaction.inGuild() && interaction.channel) {
@@ -299,16 +290,11 @@ export class Discord implements Connector {
       chat.add([{ interaction, prompt: '/clear' }]);
       return;
     }
-    if (interaction.commandName === RESTART.name && interaction.options.getString('what') === 'bot') {
-      console.log(`restart requested by ${interaction.user.tag}`);
-      await interaction.reply('Restarting the bot…').catch(() => {});
-      await this.clod[Symbol.asyncDispose]();
-      process.exit(Clod.RESTART_CODE);
-    }
-    if (interaction.commandName === RESTART.name) {
-      chat.session.restart();
-      console.log(`restarted the instance in ${dir}`);
-      await interaction.reply('Instance restarted; the next message resumes the session.');
+    // The bot's own commands; Clod runs them once allow allows them
+    if (interaction.commandName === RESTART.name || interaction.commandName === STOP.name) {
+      const prompt = interaction.commandName === STOP.name ? '/stop' : `/restart ${interaction.options.getString('what')}`;
+      await interaction.deferReply();
+      chat.add([{ interaction, prompt }]);
       return;
     }
     const command = this.commands.get(interaction.commandName);
@@ -321,16 +307,30 @@ export class Discord implements Connector {
     chat.add([{ interaction, prompt: promptOf(command, interaction) }]);
   }
 
-  // Exit code 0, so index.ts doesn't start a new process
-  private async stop(interaction: ButtonInteraction) {
-    if (!this.adminIds.includes(interaction.user.id)) {
-      await interaction.reply({ content: 'Only admins can stop the bot.', flags: MessageFlags.Ephemeral });
-      return;
+  // The bot's own commands restart or stop things, so they're for admins
+  // even without admin-only. /stop waits for its button, on the command's
+  // deferred reply, which the command's own reply replaces.
+  async allow(interaction: ChatInputCommandInteraction, command: Command): Promise<Session.Decision> {
+    if (!this.adminIds.includes(interaction.user.id)) return { behavior: 'deny', message: `Only admins can use /${command.name}.` };
+    console.log(`/${command.name} by ${interaction.user.tag}`);
+    if (command.name !== 'stop') return { behavior: 'allow' };
+    const confirm = new ButtonBuilder().setCustomId(STOP_BUTTON).setLabel('Stop the bot').setStyle(ButtonStyle.Danger);
+    const message = await interaction.editReply({
+      content: 'This stops the whole bot until someone starts it again.',
+      components: [new ActionRowBuilder<ButtonBuilder>().addComponents(confirm)],
+    });
+    const admin = (click: { user: { id: string }; reply(o: object): Promise<unknown> }) => {
+      if (this.adminIds.includes(click.user.id)) return true;
+      click.reply({ content: 'Only admins can stop the bot.', flags: MessageFlags.Ephemeral }).catch(() => {});
+      return false;
+    };
+    try {
+      const click = await message.awaitMessageComponent({ componentType: ComponentType.Button, filter: admin, time: STOP_CONFIRM_MS });
+      await click.deferUpdate();
+      return { behavior: 'allow' };
+    } catch {
+      return { behavior: 'deny', message: 'Not stopped: nobody confirmed in time.' };
     }
-    console.log(`stop requested by ${interaction.user.tag}`);
-    await interaction.update({ content: 'Stopping the bot…', components: [] }).catch(() => {});
-    await this.clod[Symbol.asyncDispose]();
-    process.exit(0);
   }
 
   // Queues the messages sent in the chat's channel while the bot was offline,

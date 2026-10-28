@@ -65,9 +65,11 @@ Claude's slash commands work as Discord commands. The bot adds three, for admins
 - `/restart instance|bot`: restart the channel's Claude instance, or the whole bot
 - `/stop`: stop the whole bot, after a confirmation button
 
+`/restart` and `/stop` only run as Discord commands; typed as messages, they're refused.
+
 ### Remote Control
 
-Sessions show up in claude.ai/code and the Claude app.
+Sessions show up in claude.ai/code and the Claude app. Typing `/restart`, `/restart bot` or `/stop` there runs the bot's own command, without confirmation, as the app is the account owner's.
 
 ## CLAUDE.md
 
