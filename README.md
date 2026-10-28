@@ -44,7 +44,7 @@ On first run clod prints a link to log claude in, and reads the code back from t
   - With `mode: manual` you get one session for the path itself.
   - With `mode: auto` you get a session per directory:
     - only directories in `include` are included;
-    - and directories in `except` are explicitly excluded.
+    - and directories in `exclude` are explicitly excluded.
   - Each entry can add `args` and `env`, and set per connector options under `connectors`, keyed by connector name.
 - `connectors`: the backends, keyed by name, each with a `type`. A connector is off unless `enabled: true`, whatever the paths say.
 

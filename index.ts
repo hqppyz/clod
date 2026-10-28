@@ -1,7 +1,7 @@
 import { stat } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
-import { ConfigError, loadConfig } from './src/config';
-import { resolveDirs } from './src/dirs';
+import { Config } from './src/config';
+import { Dirs } from './src/dirs';
 import { Clod } from './src/clod';
 
 // The bot runs in a child process, so /restart bot can exit it and get a new
@@ -20,23 +20,23 @@ if (!Bun.env.BOT_WORKER) {
   }
 }
 
-let config: Clod.Config;
+let config: Config;
 let dirs: string[][];
 try {
   let values: { data?: string };
   try {
     ({ values } = parseArgs({ args: Bun.argv.slice(2), options: { data: { type: 'string' } } }));
   } catch (e) {
-    throw new ConfigError((e as Error).message);
+    throw new Config.Error((e as Error).message);
   }
-  if (!values.data) throw new ConfigError('--data <dir> is required');
+  if (!values.data) throw new Config.Error('--data <dir> is required');
   if (!(await stat(values.data).catch(() => null))?.isDirectory()) {
-    throw new ConfigError(`--data: ${values.data} is not a directory`);
+    throw new Config.Error(`--data: ${values.data} is not a directory`);
   }
-  config = await loadConfig(values.data);
-  dirs = await Promise.all(config.paths.map(resolveDirs));
+  config = await Config.load(values.data);
+  dirs = await Promise.all(config.paths.map(Dirs.resolve));
 } catch (e) {
-  if (!(e instanceof ConfigError)) throw e;
+  if (!(e instanceof Config.Error)) throw e;
   console.error(`config error: ${e.message}`);
   process.exit(1);
 }
@@ -50,7 +50,7 @@ let clod: Clod;
 try {
   clod = await Clod.create(config);
 } catch (e) {
-  if (!(e instanceof ConfigError)) throw e;
+  if (!(e instanceof Config.Error)) throw e;
   console.error(`config error: ${e.message}`);
   process.exit(1);
 }

@@ -1,18 +1,19 @@
 import { expect, test } from 'bun:test';
 import type { Message } from 'discord.js';
 import { Session } from '../../session';
-import { statusFor as statusOf } from './presence';
-import { chunks, describe as describeEvent, LiveReply, RULE } from './log';
+import { Status } from './channels';
+import { Presence } from './presence';
+import { Log } from './log';
 
 // Events as Claude writes them, read the way the bot reads them
 const ev = (event: object): any => Session.parse(JSON.stringify(event));
-const describe = (event: object, calls?: Map<string, Session.ToolUse>) => describeEvent(ev(event), calls);
-const cost = (event: object) => Session.cost(ev(event));
-const effortSet = (event: object) => Session.effortSet(ev(event));
-const isThinking = (event: object) => Session.isThinking(ev(event));
-const session = (event: object) => Session.status(event as Session.Init);
-const usage = (event: object, now?: number) => Session.usage(ev(event), now);
-const statusFor = (event: object) => statusOf(ev(event));
+const describe = (event: object, calls?: Map<string, Session.Tool>) => Log.describe(ev(event), calls);
+const cost = (event: object) => Status.cost(ev(event));
+const effortSet = (event: object) => Status.effort(ev(event));
+const isThinking = (event: object) => Session.thinking(ev(event));
+const session = (event: object) => Status.init(event as Session.Init);
+const usage = (event: object, now?: number) => Presence.usage(ev(event), now);
+const statusFor = (event: object) => Presence.status(ev(event));
 
 test("shows Claude's text as is and tool calls as small text", () => {
   const event = {
@@ -109,27 +110,27 @@ test("shows what's left of the 5-hour window", () => {
 });
 
 test('splits text past the message limit at a newline', () => {
-  const parts = chunks(`${'a'.repeat(1500)}\n${'b'.repeat(1500)}`);
+  const parts = Log.chunks(`${'a'.repeat(1500)}\n${'b'.repeat(1500)}`);
   expect(parts).toEqual(['a'.repeat(1500), 'b'.repeat(1500)]);
 });
 
 test('edits the last message and sends a new one when it overflows', async () => {
   const calls: string[] = [];
-  const live = new LiveReply({
+  const live = new Log.Reply({
     send: async (content, i) => (calls.push(`send ${i} ${content.length}`), {} as Message),
     edit: async (_, content, i) => calls.push(`edit ${i} ${content.length}`),
     report: async () => {},
   });
   live.add(ev({ type: 'system', subtype: 'status' }));
   live.add(ev({ type: 'assistant', message: { content: [{ type: 'text', text: 'x'.repeat(1990) }] } }));
-  await live.finish({ text: 'x'.repeat(1990), isError: false });
+  await live.finish({ text: 'x'.repeat(1990), failed: false });
   // The rule joins the first message, which is then full, so the text starts a second one
-  expect(calls).toEqual(['send 0 16', `edit 0 ${16 + 1 + RULE.length + 1}`, 'send 1 1990']);
+  expect(calls).toEqual(['send 0 16', `edit 0 ${16 + 1 + Log.RULE.length + 1}`, 'send 1 1990']);
 });
 
 test("puts a rule where log lines and Claude's text meet", async () => {
   const sent: string[] = [];
-  const live = new LiveReply({
+  const live = new Log.Reply({
     send: async (content) => (sent.push(content), {} as Message),
     edit: async (_, content) => sent.push(content),
     report: async () => {},
@@ -137,13 +138,13 @@ test("puts a rule where log lines and Claude's text meet", async () => {
   const text = (text: string) => ({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
   const status = { type: 'system', subtype: 'status' };
   for (const event of [text('a'), text('b'), status, status, text('c')]) live.add(ev(event));
-  await live.finish({ text: 'c', isError: false });
-  expect(sent.at(-1)).toBe(['a', 'b', RULE, '-# system/status', '-# system/status', RULE, '', 'c'].join('\n'));
+  await live.finish({ text: 'c', failed: false });
+  expect(sent.at(-1)).toBe(['a', 'b', Log.RULE, '-# system/status', '-# system/status', Log.RULE, '', 'c'].join('\n'));
 });
 
 test("edits a Bash call's message to add its output", async () => {
   const sent: string[] = [];
-  const live = new LiveReply({
+  const live = new Log.Reply({
     send: async (content) => (sent.push(content), {} as Message),
     edit: async (_, content) => sent.push(content),
     report: async () => {},
@@ -151,13 +152,13 @@ test("edits a Bash call's message to add its output", async () => {
   live.add(ev({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'b', name: 'Bash', input: { command: 'ls' } }] } }));
   await live.settle();
   live.add(ev({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'b', content: 'a' }] } }));
-  await live.finish({ text: '', isError: false });
+  await live.finish({ text: '', failed: false });
   expect(sent).toEqual(['-# bash\n```bash\n$ ls\n```', '-# bash\n```bash\n$ ls\na\n```']);
 });
 
 test('reports a failed send once in the channel', async () => {
   const reports: string[] = [];
-  const live = new LiveReply({
+  const live = new Log.Reply({
     send: async () => {
       throw new Error('Missing Permissions');
     },
@@ -167,6 +168,6 @@ test('reports a failed send once in the channel', async () => {
   live.add(ev({ type: 'system', subtype: 'status' }));
   await live.settle();
   live.add(ev({ type: 'assistant', message: { content: [{ type: 'text', text: 'a' }] } }));
-  await live.finish({ text: 'a', isError: false });
+  await live.finish({ text: 'a', failed: false });
   expect(reports).toEqual(["Failed to send Claude's reply: Missing Permissions"]);
 });

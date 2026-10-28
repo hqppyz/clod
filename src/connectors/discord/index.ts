@@ -13,95 +13,131 @@ import {
   type Guild,
   type Message,
 } from 'discord.js';
+import { relative } from 'node:path';
 import { Instance } from '../../claude';
 import type { Clod } from '../../clod';
 import type { Command } from '../../command';
-import { bool, checkKeys, str } from '../../config';
-import { includeIndex } from '../../dirs';
+import { Config } from '../../config';
 import type { Session } from '../../session';
 import type { Connector } from '..';
-import { pick } from './ask';
-import { LoginMessages } from './auth';
-import { decide, isPermitButton } from './permit';
-import { CategorySync, ChannelDirs } from './channels';
-import { Chat, Chats } from './chats';
-import { promptOf, suggest, suggestionsOf, toDiscord, type Registered, type Suggestions } from './commands';
+import { Asking } from './ask';
+import { Logins } from './auth';
+import { Category, Channels } from './channels';
+import { Chat, History } from './chats';
+import { Commands } from './commands';
 import { snowflake, snowflakes } from './config';
+import { Permitting } from './permit';
+import { Presence } from './presence';
 
-// /stop's button, which allow waits for
-const STOP_BUTTON = 'stop:confirm';
-// How long the button waits for its click
-const STOP_CONFIRM_MS = 60_000;
-
-// One path entry served, as its block says
 export class Path implements Connector.Path {
   constructor(
     private readonly discord: Discord,
-    readonly entry: Clod.Path,
-    readonly adminOnly: boolean,
+    readonly entry: Config.Path,
+    // admin-only
+    readonly restricted: boolean,
     // manual: the existing channel the path is linked to
-    readonly channelId?: string,
+    readonly channel?: string,
     // auto: the category its channels go under; undefined is the top of the server
-    readonly categoryId?: string,
+    readonly category?: string,
   ) {}
 
   attach(session: Session): Promise<Chat> {
     return this.discord.attach(session, this);
   }
+
+  // The first include pattern matching dir, to order channels by; "." only matches the path itself
+  include(dir: string): number {
+    if (this.entry.mode !== 'auto') return 0;
+    const { include } = this.entry;
+    const rel = relative(this.entry.path, dir) || '.';
+    const found = include.findIndex((p) => (rel === '.' ? p === '.' : new Bun.Glob(p).match(rel)));
+    return found === -1 ? include.length : found;
+  }
 }
 
 // A single Discord server, each served directory a channel of it
 export class Discord implements Connector {
-  // Each served channel's chat, one per attached session
-  private readonly chatsByChannel = new Map<string, Chat>();
-  // The categories auto paths keep channels in, opened as first needed
-  private readonly categories = new Map<string | null, Promise<CategorySync>>();
-  // Discord command name to Claude command, filled once they're registered
-  private commands: Registered['names'] = new Map();
-  private suggestions: Suggestions = {};
-  private readonly logins: LoginMessages;
+  readonly type = 'discord';
+  // By channel
+  private readonly chats = new Map<string, Chat>();
+  // Opened as first needed
+  private readonly categories = new Map<string | null, Promise<Category>>();
+  // Filled once they're registered
+  private commands: Commands.Registered['names'] = new Map();
+  private suggestions: Commands.Suggestions = {};
+  private readonly logins: Logins;
+  readonly presence: Presence;
 
   private constructor(
     readonly id: string,
     private readonly clod: Clod,
     private readonly client: Client<true>,
     private readonly guild: Guild,
-    readonly adminIds: readonly string[],
-    private readonly adminOnly: boolean,
-    private readonly channelDirs: ChannelDirs,
-    private readonly chats: Chats,
+    readonly admins: readonly string[],
+    // admin-only
+    private readonly restricted: boolean,
+    private readonly channels: Channels,
+    private readonly history: History,
   ) {
-    this.logins = new LoginMessages(client, adminIds);
+    this.logins = new Logins(client, admins);
+    this.presence = new Presence(guild);
   }
 
-  // Resolves logged in and serving the server, or throws
   static async create(id: string, raw: Readonly<Record<string, unknown>>, clod: Clod): Promise<Discord> {
-    checkKeys(raw, ['token', 'server-id', 'admin-id', 'admin-only'], `connectors.${id}`);
     const where = `connectors.${id}`;
+    Config.keys(raw, ['token', 'server-id', 'admin-id', 'admin-only'], where);
     // The token, a secret, can stay out of config.yaml in <ID>_TOKEN, which wins
-    const tokenEnv = `${id.toUpperCase().replaceAll('-', '_')}_TOKEN`;
-    const token = str(Bun.env[tokenEnv] || raw.token, `${where}.token (or ${tokenEnv})`);
-    const serverId = snowflake(raw['server-id'], `${where}.server-id`);
-    const adminIds = snowflakes(raw['admin-id'], `${where}.admin-id`);
-    const adminOnly = bool(raw['admin-only'], `${where}.admin-only`, true);
+    const variable = `${id.toUpperCase().replaceAll('-', '_')}_TOKEN`;
+    const token = Config.text(Bun.env[variable] || raw.token, `${where}.token (or ${variable})`);
+    const server = snowflake(raw['server-id'], `${where}.server-id`);
+    const admins = snowflakes(raw['admin-id'], `${where}.admin-id`);
+    const restricted = Config.bool(raw['admin-only'], `${where}.admin-only`, true);
 
     // No DirectMessages intent, so DMs never reach the bot
     const client = new Client({
       intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
     });
-    // discord.js waits out a rate limit silently, so log it
+    // discord.js waits out a rate limit silently
     client.rest.on('rateLimited', (info) => console.error(`rate limited on ${info.route} for ${info.retryAfter}ms`));
     const ready = new Promise<Client<true>>((resolve) => client.once(Events.ClientReady, resolve));
     try {
       await client.login(token);
       const c = await ready;
-      const guild = c.guilds.cache.get(serverId);
-      if (!guild) throw new Error(`bot is not a member of server ${serverId}`);
+      const guild = c.guilds.cache.get(server);
+      if (!guild) throw new Error(`bot is not a member of server ${server}`);
       console.log(`logged in as ${c.user.tag}, serving ${guild.name}`);
-      const discord = new Discord(id, clod, c, guild, adminIds, adminOnly, await ChannelDirs.load(clod.config.dataDir), await Chats.load(clod.config.dataDir));
+      const discord = new Discord(id, clod, c, guild, admins, restricted, await Channels.load(clod.config.data), await History.load(clod.config.data));
       discord.listen();
-      discord.registerCommands();
-      clod.scanned.then(() => discord.sweep()).catch((e) => console.error('failed to sweep leftover channels:', e));
+      // Listing needs a logged in Claude. Commands registered by an earlier run stay until then.
+      clod.ready
+        .then(async () => {
+          const listed = await Instance.commands(clod.config.data, clod.config.home);
+          const suggestions = Commands.suggestions(listed);
+          const registered = Commands.build(listed.commands, suggestions);
+          await guild.commands.set(registered.data);
+          discord.commands = registered.names;
+          discord.suggestions = suggestions;
+          console.log(`registered ${registered.data.length} commands`);
+        })
+        .catch((e) => console.error('failed to register commands:', e));
+      // Every category holding a managed channel is tidied, so channels of
+      // earlier runs go even where no path puts channels anymore
+      clod.scanned
+        .then(async () => {
+          const parents = new Set<string | null>();
+          for (const [id] of [...discord.channels.entries()]) {
+            try {
+              const channel = await guild.channels.fetch(id);
+              if (channel) parents.add(channel.parentId);
+            } catch (e) {
+              // Only a channel Discord says is gone; any other failure keeps its record
+              if (e instanceof DiscordAPIError && e.code === RESTJSONErrorCodes.UnknownChannel) discord.channels.delete(id);
+              else throw e;
+            }
+          }
+          for (const parent of parents) (await discord.category(parent)).tidy();
+        })
+        .catch((e) => console.error('failed to sweep leftover channels:', e));
       return discord;
     } catch (e) {
       await client.destroy();
@@ -109,46 +145,63 @@ export class Discord implements Connector {
     }
   }
 
-  register(entry: Clod.Path, raw: Readonly<Record<string, unknown>>): Path {
-    const adminOnly = bool(raw['admin-only'], 'admin-only', this.adminOnly);
+  register(entry: Config.Path, raw: Readonly<Record<string, unknown>>): Path {
+    const restricted = Config.bool(raw['admin-only'], 'admin-only', this.restricted);
     if (entry.mode === 'manual') {
-      checkKeys(raw, ['channel_id', 'admin-only'], '');
-      return new Path(this, entry, adminOnly, snowflake(raw.channel_id, 'channel_id'));
+      Config.keys(raw, ['channel_id', 'admin-only'], '');
+      return new Path(this, entry, restricted, snowflake(raw.channel_id, 'channel_id'));
     }
-    checkKeys(raw, ['category_id', 'admin-only'], '');
-    return new Path(this, entry, adminOnly, undefined, raw.category_id == null ? undefined : snowflake(raw.category_id, 'category_id'));
+    Config.keys(raw, ['category_id', 'admin-only'], '');
+    return new Path(this, entry, restricted, undefined, raw.category_id == null ? undefined : snowflake(raw.category_id, 'category_id'));
   }
 
-  // A manual path links its channel; an auto path gets a channel in its
-  // category, ordered by config entry, then include order, then name
+  // An auto path's channels are ordered by config entry, then include order, then name
   async attach(session: Session, path: Path): Promise<Chat> {
-    let channelId = path.channelId;
-    if (channelId === undefined) {
-      const entries = this.clod.config.paths;
-      const rank = [entries.indexOf(path.entry), path.entry.mode === 'auto' ? includeIndex(path.entry, session.dir) : 0];
-      channelId = await (await this.category(path.categoryId ?? null)).claim(session.dir, rank);
+    let id = path.channel;
+    if (id === undefined) {
+      const rank = [this.clod.config.paths.indexOf(path.entry), path.include(session.dir)];
+      id = await (await this.category(path.category ?? null)).claim(session.dir, rank);
     }
-    const chat = new Chat(this.chats, this, this.guild, channelId, session, path);
-    this.chatsByChannel.set(channelId, chat);
-    this.catchUp(chat).catch((e) => console.error(`failed to catch up on missed messages in ${session.dir}:`, e));
+    const chat = new Chat(this.history, this, this.guild, id, session, path);
+    this.chats.set(id, chat);
+    // Messages sent while the bot was offline go out merged into one turn
+    const missed = async () => {
+      const last = this.history.get(chat.id)?.lastMessageId;
+      if (!last) return;
+      const channel = await this.guild.channels.fetch(chat.id).catch(() => null);
+      if (!channel?.isTextBased()) return;
+      const found: Message[] = [];
+      let after = last;
+      for (;;) {
+        const page = await channel.messages.fetch({ after, limit: 100 });
+        found.push(...page.values());
+        if (page.size < 100) break;
+        after = page.reduce((max, m) => (BigInt(m.id) > BigInt(max) ? m.id : max), after);
+      }
+      const accepted = found.filter((m) => this.accepting(m));
+      if (accepted.length === 0) return;
+      console.log(`catching up on ${accepted.length} message(s) in ${session.dir}`);
+      chat.add(accepted);
+    };
+    missed().catch((e) => console.error(`failed to catch up on missed messages in ${session.dir}:`, e));
     return chat;
   }
 
-  // A chat's attachment disposed: an auto path's channel goes with it
+  // An auto path's channel goes with its chat
   async detach(chat: Chat): Promise<void> {
-    if (this.chatsByChannel.get(chat.channelId) === chat) this.chatsByChannel.delete(chat.channelId);
-    if (chat.path.channelId === undefined) await (await this.category(chat.path.categoryId ?? null)).release(chat.session.dir);
+    if (this.chats.get(chat.id) === chat) this.chats.delete(chat.id);
+    if (chat.path.channel === undefined) await (await this.category(chat.path.category ?? null)).release(chat.session.dir);
   }
 
-  // Its CONNECTORS.discord.md bullet, for an instance about to start
-  bullet(): Promise<string | undefined> {
-    return this.clod.connectorBullet('discord', { CONNECTOR: this.id, BOT_NAME: this.client.user.username });
+  // For its CONNECTORS.discord.md
+  get values(): Readonly<Record<string, string>> {
+    return { CONNECTOR: this.id, BOT_NAME: this.client.user.username };
   }
 
   async notify(event: Clod.Event): Promise<void> {
     if (event.type === 'login-required') return this.logins.required(event);
     if (event.type === 'logged-in') return this.logins.done(event.by);
-    for (const id of this.adminIds) {
+    for (const id of this.admins) {
       await this.client.users
         .fetch(id)
         .then((user) => user.send(event.text))
@@ -160,28 +213,10 @@ export class Discord implements Connector {
     await this.client.destroy();
   }
 
-  // Tidies every category holding a managed channel, so channels of earlier
-  // runs go even where no path puts channels anymore. Records of channels
-  // deleted by hand go too.
-  private async sweep() {
-    const parents = new Set<string | null>();
-    for (const [channelId] of [...this.channelDirs.entries()]) {
-      try {
-        const channel = await this.guild.channels.fetch(channelId);
-        if (channel) parents.add(channel.parentId);
-      } catch (e) {
-        // Only a channel Discord says is gone; any other failure keeps its record
-        if (e instanceof DiscordAPIError && e.code === RESTJSONErrorCodes.UnknownChannel) this.channelDirs.delete(channelId);
-        else throw e;
-      }
-    }
-    for (const parent of parents) (await this.category(parent)).tidy();
-  }
-
-  private category(id: string | null): Promise<CategorySync> {
+  private category(id: string | null): Promise<Category> {
     let category = this.categories.get(id);
     if (!category) {
-      category = CategorySync.open(this.guild, id, this.channelDirs, () => this.clod.attached);
+      category = Category.open(this.guild, id, this.channels, () => this.clod.attached);
       // A failed open is tried again by the next attach
       category.catch(() => this.categories.delete(id));
       this.categories.set(id, category);
@@ -189,41 +224,25 @@ export class Discord implements Connector {
     return category;
   }
 
-  private registerCommands() {
-    // Listing needs a logged in Claude. Commands registered by an earlier run stay until then.
-    this.clod.ready
-      .then(async () => {
-        const listed = await Instance.commands(this.clod.config.dataDir, this.clod.home);
-        const found = suggestionsOf(listed);
-        const registered = toDiscord(listed.commands, [], found);
-        await this.guild.commands.set(registered.data);
-        this.commands = registered.names;
-        this.suggestions = found;
-        console.log(`registered ${registered.data.length} commands`);
-      })
-      .catch((e) => console.error('failed to register commands:', e));
+  private allowed(user: string, channel: string) {
+    const restricted = this.chats.get(channel)?.path.restricted ?? this.restricted;
+    return !restricted || this.admins.includes(user);
   }
 
-  // Single server bot: only messages from its server, never from bots
-  // (including itself), and with admin-only, only from the admins
-  private allowed(userId: string, channelId: string) {
-    const adminOnly = this.chatsByChannel.get(channelId)?.path.adminOnly ?? this.adminOnly;
-    return !adminOnly || this.adminIds.includes(userId);
-  }
-
+  // Single server bot: never from bots, itself included
   private accepting(message: Message) {
     return message.guildId === this.guild.id && !message.author.bot && this.allowed(message.author.id, message.channelId);
   }
 
   private listen() {
     this.client.on(Events.MessageCreate, (message) => {
-      if (this.accepting(message)) this.chatsByChannel.get(message.channelId)?.add([message]);
+      if (this.accepting(message)) this.chats.get(message.channelId)?.add([message]);
     });
     this.client.on(Events.InteractionCreate, (interaction) => {
       // Other instances of the bot may serve other servers or channels with the
       // same token, so whatever isn't in one of ours is theirs to answer
       if (interaction.guildId !== this.guild.id || !interaction.channelId) return;
-      const chat = this.chatsByChannel.get(interaction.channelId);
+      const chat = this.chats.get(interaction.channelId);
       if (!chat) return;
       if (!this.allowed(interaction.user.id, interaction.channelId)) {
         // An interaction left unanswered shows as failed, so tell them why
@@ -232,79 +251,56 @@ export class Discord implements Connector {
         }
         return;
       }
-      if (interaction.isStringSelectMenu()) pick(interaction);
-      if (interaction.isButton() && isPermitButton(interaction.customId)) {
+      if (interaction.isStringSelectMenu()) Asking.pick(interaction);
+      if (interaction.isButton() && Permitting.owns(interaction.customId)) {
         // Running tools nobody approved is for admins, even without admin-only
-        if (this.adminIds.includes(interaction.user.id)) decide(interaction);
+        if (this.admins.includes(interaction.user.id)) Permitting.click(interaction);
         else interaction.reply({ content: 'Only admins can approve tool calls.', flags: MessageFlags.Ephemeral }).catch(() => {});
       }
       if (interaction.isAutocomplete()) {
         const { name, value } = interaction.options.getFocused(true);
-        interaction.respond(suggest(this.suggestions[name] ?? [], value)).catch(() => {});
+        interaction.respond(Commands.suggest(this.suggestions[name] ?? [], value)).catch(() => {});
         return;
       }
       if (!interaction.isChatInputCommand()) return;
-      this.runCommand(interaction, chat).catch((e) => console.error(`/${interaction.commandName} failed:`, e));
+      const command = this.commands.get(interaction.commandName);
+      if (command === undefined) {
+        interaction.reply({ content: 'Unknown command.', flags: MessageFlags.Ephemeral }).catch(() => {});
+        return;
+      }
+      // Deferring buys 15 minutes to answer instead of 3 seconds
+      interaction
+        .deferReply()
+        .then(() => chat.add([{ interaction, prompt: Commands.prompt(command, interaction) }]))
+        .catch((e) => console.error(`/${interaction.commandName} failed:`, e));
     });
-  }
-
-  private async runCommand(interaction: ChatInputCommandInteraction, chat: Chat) {
-    const dir = chat.session.dir;
-    const command = this.commands.get(interaction.commandName);
-    if (command === undefined) {
-      await interaction.reply({ content: 'Unknown command.', flags: MessageFlags.Ephemeral });
-      return;
-    }
-    // Deferring buys 15 minutes to answer instead of 3 seconds
-    await interaction.deferReply();
-    chat.add([{ interaction, prompt: promptOf(command, interaction) }]);
   }
 
   // The bot's own commands restart or stop things, so they're for admins
   // even without admin-only. /stop waits for its button, on the command's
   // deferred reply, which the command's own reply replaces.
   async allow(interaction: ChatInputCommandInteraction, command: Command): Promise<Session.Decision> {
-    if (!this.adminIds.includes(interaction.user.id)) return { behavior: 'deny', message: `Only admins can use /${command.name}.` };
+    const BUTTON = 'stop:confirm';
+    const CONFIRM_MS = 60_000;
+    if (!this.admins.includes(interaction.user.id)) return { behavior: 'deny', message: `Only admins can use /${command.name}.` };
     console.log(`/${command.name} by ${interaction.user.tag}`);
     if (command.name !== 'stop') return { behavior: 'allow' };
-    const confirm = new ButtonBuilder().setCustomId(STOP_BUTTON).setLabel('Stop the bot').setStyle(ButtonStyle.Danger);
+    const confirm = new ButtonBuilder().setCustomId(BUTTON).setLabel('Stop the bot').setStyle(ButtonStyle.Danger);
     const message = await interaction.editReply({
       content: 'This stops the whole bot until someone starts it again.',
       components: [new ActionRowBuilder<ButtonBuilder>().addComponents(confirm)],
     });
     const admin = (click: { user: { id: string }; reply(o: object): Promise<unknown> }) => {
-      if (this.adminIds.includes(click.user.id)) return true;
+      if (this.admins.includes(click.user.id)) return true;
       click.reply({ content: 'Only admins can stop the bot.', flags: MessageFlags.Ephemeral }).catch(() => {});
       return false;
     };
     try {
-      const click = await message.awaitMessageComponent({ componentType: ComponentType.Button, filter: admin, time: STOP_CONFIRM_MS });
+      const click = await message.awaitMessageComponent({ componentType: ComponentType.Button, filter: admin, time: CONFIRM_MS });
       await click.deferUpdate();
       return { behavior: 'allow' };
     } catch {
       return { behavior: 'deny', message: 'Not stopped: nobody confirmed in time.' };
     }
-  }
-
-  // Queues the messages sent in the chat's channel while the bot was offline,
-  // which go out merged into one turn
-  private async catchUp(chat: Chat) {
-    const last = this.chats.get(chat.channelId)?.lastMessageId;
-    if (!last) return;
-    const channel = await this.guild.channels.fetch(chat.channelId).catch(() => null);
-    if (!channel?.isTextBased()) return;
-
-    const missed: Message[] = [];
-    let after = last;
-    for (;;) {
-      const page = await channel.messages.fetch({ after, limit: 100 });
-      missed.push(...page.values());
-      if (page.size < 100) break;
-      after = page.reduce((max, m) => (BigInt(m.id) > BigInt(max) ? m.id : max), after);
-    }
-    const accepted = missed.filter((m) => this.accepting(m));
-    if (accepted.length === 0) return;
-    console.log(`catching up on ${accepted.length} message(s) in ${chat.session.dir}`);
-    chat.add(accepted);
   }
 }

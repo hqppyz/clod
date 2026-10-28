@@ -1,78 +1,66 @@
 import { basename } from 'node:path';
-import type { Instance } from '../claude';
-import { render, type Clod } from '../clod';
-import { checkKeys, str } from '../config';
+import type { Clod } from '../clod';
+import { Config } from '../config';
+import { Template } from '../template';
 import type { Session } from '../session';
 import type { Connector } from '.';
 
-const DEFAULT_NAME = '{{NAME}}';
-
-// Waited before starting an instance that exited on its own again, so one
-// that keeps crashing doesn't spin
-const REWAKE_MS = 10_000;
-
-// Makes sessions reachable from claude.ai/code and the Claude app through
-// Remote Control. Prompts from there go straight into the instance, so all it
-// does is keep an instance running per session, Remote Control enabled.
+// Prompts from claude.ai/code and the Claude app go straight into the
+// instance, so all it does is keep one running per session, Remote Control enabled
 export class RemoteControl implements Connector {
+  readonly type = 'remote-control';
+
   private constructor(
     readonly id: string,
-    private readonly clod: Clod,
     private readonly name: string,
   ) {}
 
-  // Nothing to connect, so parsing is all that can fail
-  static async create(id: string, raw: Readonly<Record<string, unknown>>, clod: Clod): Promise<RemoteControl> {
-    checkKeys(raw, ['name'], `connectors.${id}`);
-    const name = raw.name == null ? DEFAULT_NAME : str(raw.name, `connectors.${id}.name`);
-    return new RemoteControl(id, clod, name);
+  static async create(id: string, raw: Readonly<Record<string, unknown>>, _clod: Clod): Promise<RemoteControl> {
+    Config.keys(raw, ['name'], `connectors.${id}`);
+    const name = raw.name == null ? '{{NAME}}' : Config.text(raw.name, `connectors.${id}.name`);
+    return new RemoteControl(id, name);
   }
 
-  register(_entry: Clod.Path, raw: Readonly<Record<string, unknown>>): Path {
-    checkKeys(raw, ['name'], '');
-    return new Path(this.clod, this.id, raw.name == null ? this.name : str(raw.name, 'name'));
+  register(_entry: Config.Path, raw: Readonly<Record<string, unknown>>): Path {
+    Config.keys(raw, ['name'], '');
+    return new Path(this.id, raw.name == null ? this.name : Config.text(raw.name, 'name'));
   }
 
   async [Symbol.asyncDispose](): Promise<void> {}
 }
 
-// One path entry served
 class Path implements Connector.Path {
   constructor(
-    private readonly clod: Clod,
     private readonly id: string,
-    // The session's name in claude.ai/code and the app; {{NAME}} is the directory's name
+    // {{NAME}} is the directory's name
     private readonly name: string,
   ) {}
 
   async attach(session: Session): Promise<Attachment> {
-    const attachment = new Attachment(this.clod, this.id, session, this.name);
+    const attachment = new Attachment(this.id, session, this.name);
     attachment.wake();
     return attachment;
   }
 }
 
-// One session served: an instance kept running with Remote Control enabled
 class Attachment implements Connector.Attachment {
   private disposed = false;
 
   constructor(
-    private readonly clod: Clod,
     private readonly id: string,
     private readonly session: Session,
     private readonly name: string,
   ) {}
 
-  async lifecycle(event: Instance.Event): Promise<void> {
+  async lifecycle(event: Connector.Lifecycle): Promise<void> {
     switch (event.type) {
       case 'starting': {
         event.options.args.push('--name', this.title);
-        const bullet = await this.clod.connectorBullet('remote-control', { CONNECTOR: this.id });
-        if (bullet) event.options.prompts.push(bullet);
+        await event.prompt({ CONNECTOR: this.id });
         return;
       }
       case 'started': {
-        const url = await event.instance.remoteControl(true);
+        const url = await event.instance.remote(true);
         await event.instance.rename(this.title).catch((e) => console.error(`failed to rename ${this.session.dir}:`, e));
         console.log(`remote control for ${this.session.dir}: ${url}`);
         return;
@@ -81,15 +69,18 @@ class Attachment implements Connector.Attachment {
       case 'idle':
         event.keep();
         return;
-      case 'stopped':
+      case 'stopped': {
+        // So an instance that keeps crashing doesn't spin
+        const REWAKE_MS = 10_000;
         if (event.reason === 'restart') this.wake();
         if (event.reason === 'exit') setTimeout(() => this.wake(), REWAKE_MS);
         return;
+      }
     }
   }
 
   private get title(): string {
-    return render(this.name, { NAME: basename(this.session.dir) });
+    return Template.fill(this.name, { NAME: basename(this.session.dir) });
   }
 
   // The app shows the instance's events itself
@@ -115,6 +106,6 @@ class Attachment implements Connector.Attachment {
   // Control; it stops at its next idle unless one of them keeps it
   async [Symbol.asyncDispose](): Promise<void> {
     this.disposed = true;
-    await this.session.instance?.remoteControl(false).catch(() => {});
+    await this.session.instance?.remote(false).catch(() => {});
   }
 }

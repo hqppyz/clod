@@ -1,13 +1,13 @@
-import { fail } from '../../config';
+import { Config } from '../../config';
 
 export function snowflake(v: unknown, where: string): string {
-  if (v === undefined || v === null) fail(where, 'required');
+  if (v === undefined || v === null) Config.fail(where, 'required');
   if (typeof v === 'number') {
     // YAML parses unquoted IDs as floats, which can't hold 19-digit snowflakes
-    if (!Number.isSafeInteger(v)) fail(where, 'ID too large for an unquoted number, wrap it in quotes');
+    if (!Number.isSafeInteger(v)) Config.fail(where, 'ID too large for an unquoted number, wrap it in quotes');
     v = String(v);
   }
-  if (typeof v !== 'string' || !/^\d+$/.test(v)) fail(where, 'expected a Discord ID');
+  if (typeof v !== 'string' || !/^\d+$/.test(v)) Config.fail(where, 'expected a Discord ID');
   return v;
 }
 

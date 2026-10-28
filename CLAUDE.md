@@ -3,7 +3,7 @@
 - Keep logic where it's used. A helper must serve code reused in more than one place.
 - Prefer a method on the instance it describes over a free helper.
 - Keep symbols in their namespace: `Session.Options`, not `SessionOptions`.
-- Name symbols with one word when possible; the namespace carries the rest.
+- Prefer one-word names; the namespace and type carry the rest. Use more words when one would be unclear at the call site.
 - Make values like regexps and limits named constants, in the narrowest scope all their uses share: function body, class, namespace, then file.
 - Match the surrounding code's comments: say why, not what.
 

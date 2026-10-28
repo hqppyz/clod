@@ -1,10 +1,11 @@
 import { basename, join } from 'node:path';
 import { ChannelType, type CategoryChannel, type Guild, type TextChannel } from 'discord.js';
+import type { Session } from '../../session';
 
-// Which directory each managed channel holds, kept in the data dir.
-// Unmanaged channels are never deleted, so the category can hold other
-// channels too; one whose name matches a new directory is adopted instead.
-export class ChannelDirs {
+// Which directory each managed channel holds. Unmanaged channels are never
+// deleted, so the category can hold other channels too; one whose name
+// matches a new directory is adopted instead.
+export class Channels {
   private writing: Promise<unknown> = Promise.resolve();
 
   private constructor(
@@ -12,28 +13,28 @@ export class ChannelDirs {
     private readonly dirs: Map<string, string>,
   ) {}
 
-  static async load(dataDir: string): Promise<ChannelDirs> {
-    const path = join(dataDir, 'channels.json');
+  static async load(data: string): Promise<Channels> {
+    const path = join(data, 'channels.json');
     const file = Bun.file(path);
     const saved: Record<string, string> = (await file.exists()) ? await file.json() : {};
-    return new ChannelDirs(path, new Map(Object.entries(saved)));
+    return new Channels(path, new Map(Object.entries(saved)));
   }
 
-  get(channelId: string): string | undefined {
-    return this.dirs.get(channelId);
+  get(id: string): string | undefined {
+    return this.dirs.get(id);
   }
 
   entries(): IterableIterator<[string, string]> {
     return this.dirs.entries();
   }
 
-  set(channelId: string, dir: string) {
-    this.dirs.set(channelId, dir);
+  set(id: string, dir: string) {
+    this.dirs.set(id, dir);
     this.save();
   }
 
-  delete(channelId: string) {
-    if (this.dirs.delete(channelId)) this.save();
+  delete(id: string) {
+    if (this.dirs.delete(id)) this.save();
   }
 
   private save() {
@@ -42,49 +43,64 @@ export class ChannelDirs {
   }
 }
 
-// The status line the bot keeps as a channel's topic, found by its shape so
-// updating one part leaves the others alone. Lines of no known shape, like an
-// old format's, are dropped so the topic fixes itself.
-// All on one line, as "<model> · <effort> · <mode> · <cost>"
+// The line the bot keeps as a channel's topic, "<model> · <effort> · <mode> · <cost>"
 export interface Status {
   readonly model?: string;
   readonly effort?: string;
-  // The session's permission mode
   readonly mode?: string;
-  // The last turn's tokens and cost, as "<tokens> · $<cost>"
+  // "<tokens> · $<cost>"
   readonly cost?: string;
 }
 
-const STATUS_LINE = /^(\S+) · (\S+) · ([a-zA-Z]+)(?: · (.+ · \$[\d.]+))?$/;
+// Found by its shape, so updating one part leaves the others alone. Lines of
+// no known shape, like an old format's, are dropped so the topic fixes itself.
+export namespace Status {
+  const LINE = /^(\S+) · (\S+) · ([a-zA-Z]+)(?: · (.+ · \$[\d.]+))?$/;
 
-export function parseTopic(topic: string | null): Status {
-  const lines = (topic ?? '').split('\n').filter(Boolean);
-  const [, model, effort, mode, cost] = lines.map((l) => STATUS_LINE.exec(l)).find(Boolean) ?? [];
-  return { model, effort, mode, cost };
+  export function parse(topic: string | null): Status {
+    const lines = (topic ?? '').split('\n').filter(Boolean);
+    const [, model, effort, mode, cost] = lines.map((l) => LINE.exec(l)).find(Boolean) ?? [];
+    return { model, effort, mode, cost };
+  }
+
+  // Each kind of token apart, since they're priced apart: cache reads cost a
+  // tenth of fresh input, cache writes more than it. Local commands have none.
+  export function cost(event: Session.Result): string | undefined {
+    if (event.local_command) return undefined;
+    const kinds: [keyof Session.Usage, string][] = [
+      ['cache_read_input_tokens', 'cache read'],
+      ['cache_creation_input_tokens', 'cache write'],
+      ['input_tokens', 'in'],
+      ['output_tokens', 'out'],
+    ];
+    const tokens = kinds.map(([key, label]) => {
+      const n = event.usage?.[key] ?? 0;
+      return `${n >= 1000 ? `${(n / 1000).toFixed(1)}k` : n} ${label}`;
+    });
+    return `${tokens.join(' · ')} · $${(event.total_cost_usd ?? 0).toFixed(3)}`;
+  }
+
+  export const init = (event: Session.Init): Status => ({ model: event.model, mode: event.permissionMode });
+
+  // The result's text is the only place it shows
+  export const effort = (event: Session.Result): string | undefined =>
+    event.local_command === 'effort' ? /effort level to (\w+)/i.exec(event.result ?? '')?.[1]?.toLowerCase() : undefined;
+
+  // The topic with the given parts replaced and the others kept
+  export function apply(topic: string | null, status: Status): string {
+    const given = Object.fromEntries(Object.entries(status).filter(([, v]) => v !== undefined));
+    const { model, effort, mode, cost } = { ...parse(topic), ...given };
+    return model && effort && mode ? [model, effort, mode, cost].filter(Boolean).join(' · ') : '';
+  }
 }
 
-// The topic with the given parts replaced and the others kept
-export function withStatus(topic: string | null, status: Status): string {
-  const { model, effort, mode, cost } = { ...parseTopic(topic), ...stripUndefined(status) };
-  return model && effort && mode ? [model, effort, mode, cost].filter(Boolean).join(' · ') : '';
-}
-
-const stripUndefined = (status: Status) => Object.fromEntries(Object.entries(status).filter(([, v]) => v !== undefined));
-
-// Discord text channel names: lowercase, no spaces, at most 100 characters
-function channelName(dir: string): string {
-  const name = basename(dir).toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
-  return (name || 'root').slice(0, 100);
-}
-
-// Keeps the managed text channels of one category, or of the top of the server
-// when null: a channel per claimed directory, adopted or created as it's
-// claimed and deleted as it's released. Once the changes in progress settle,
-// managed channels nobody claimed, like those of directories gone while the
-// bot was off, are deleted, and the claimed ones ordered by rank.
-export class CategorySync {
-  // Claimed directories, with their channel and rank
-  private readonly claimed = new Map<string, { channelId: string; rank: readonly number[] }>();
+// The managed text channels of one category, or of the top of the server when
+// null: one per claimed directory, adopted or created as it's claimed and
+// deleted as it's released. Once the changes in progress settle, managed
+// channels nobody claimed, like those of directories gone while the bot was
+// off, are deleted, and the claimed ones ordered by rank.
+export class Category {
+  private readonly claimed = new Map<string, { id: string; rank: readonly number[] }>();
   // Changes go one at a time, so two claims can't create the same channel
   private queue: Promise<unknown> = Promise.resolve();
   private tidying = false;
@@ -92,47 +108,50 @@ export class CategorySync {
   private constructor(
     private readonly guild: Guild,
     private readonly category: CategoryChannel | null,
-    private readonly dirs: ChannelDirs,
+    private readonly dirs: Channels,
     // Resolves once no claims or releases are on their way
     private readonly settled: () => Promise<void>,
   ) {}
 
-  static async open(guild: Guild, categoryId: string | null, dirs: ChannelDirs, settled: () => Promise<void>): Promise<CategorySync> {
-    if (categoryId === null) return new CategorySync(guild, null, dirs, settled);
-    const category = await guild.channels.fetch(categoryId).catch(() => null);
-    if (category?.type !== ChannelType.GuildCategory) {
-      throw new Error(`category ${categoryId} not found in server ${guild.name}`);
-    }
-    return new CategorySync(guild, category, dirs, settled);
+  static async open(guild: Guild, id: string | null, dirs: Channels, settled: () => Promise<void>): Promise<Category> {
+    if (id === null) return new Category(guild, null, dirs, settled);
+    const category = await guild.channels.fetch(id).catch(() => null);
+    if (category?.type !== ChannelType.GuildCategory) throw new Error(`category ${id} not found in server ${guild.name}`);
+    return new Category(guild, category, dirs, settled);
+  }
+
+  // Discord text channel names: lowercase, no spaces, at most 100 characters
+  private static slug(dir: string): string {
+    const name = basename(dir).toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
+    return (name || 'root').slice(0, 100);
   }
 
   get name(): string {
     return this.category?.name ?? '(no category)';
   }
 
-  // The channel for dir: its managed one, else an unmanaged one of its name,
-  // else a new one. rank orders it among the others, lowest first, then by directory.
+  // Its managed channel, else an unmanaged one of its name, else a new one.
+  // rank orders it among the others, lowest first, then by directory.
   claim(dir: string, rank: readonly number[]): Promise<string> {
     return this.run(async () => {
       const claimed = this.claimed.get(dir);
-      if (claimed) return claimed.channelId;
+      if (claimed) return claimed.id;
       const channel = (await this.find(dir)) ?? (await this.create(dir));
-      this.claimed.set(dir, { channelId: channel.id, rank });
+      this.claimed.set(dir, { id: channel.id, rank });
       this.tidy();
       return channel.id;
     });
   }
 
-  // Deletes dir's channel
   release(dir: string): Promise<void> {
     return this.run(async () => {
       const claimed = this.claimed.get(dir);
       if (!claimed) return;
       this.claimed.delete(dir);
-      const channel = this.guild.channels.cache.get(claimed.channelId);
+      const channel = this.guild.channels.cache.get(claimed.id);
       await channel?.delete(`directory gone: ${dir}`);
-      this.dirs.delete(claimed.channelId);
-      console.log(`deleted #${channel?.name ?? claimed.channelId} (${dir})`);
+      this.dirs.delete(claimed.id);
+      console.log(`deleted #${channel?.name ?? claimed.id} (${dir})`);
       this.tidy();
     });
   }
@@ -143,18 +162,18 @@ export class CategorySync {
     return result;
   }
 
-  private textChannels(): TextChannel[] {
-    const parentId = this.category?.id ?? null;
+  private channels(): TextChannel[] {
+    const parent = this.category?.id ?? null;
     return [...this.guild.channels.cache.values()]
-      .filter((c): c is TextChannel => c.parentId === parentId && c.type === ChannelType.GuildText)
+      .filter((c): c is TextChannel => c.parentId === parent && c.type === ChannelType.GuildText)
       .sort((a, b) => a.position - b.position);
   }
 
   private async find(dir: string): Promise<TextChannel | undefined> {
-    const channels = this.textChannels();
+    const channels = this.channels();
     const managed = channels.find((channel) => this.dirs.get(channel.id) === dir);
     if (managed) return managed;
-    const name = channelName(dir);
+    const name = Category.slug(dir);
     const unmanaged = channels.find((channel) => this.dirs.get(channel.id) === undefined && channel.name === name);
     if (!unmanaged) return undefined;
     this.dirs.set(unmanaged.id, dir);
@@ -164,7 +183,7 @@ export class CategorySync {
 
   private async create(dir: string): Promise<TextChannel> {
     const channel = await this.guild.channels.create({
-      name: channelName(dir),
+      name: Category.slug(dir),
       type: ChannelType.GuildText,
       parent: this.category?.id,
       reason: `directory found: ${dir}`,
@@ -174,7 +193,7 @@ export class CategorySync {
     return channel;
   }
 
-  // Once the changes in progress settle: one tidy for all of them
+  // One tidy for all the changes in progress, once they settle
   tidy() {
     if (this.tidying) return;
     this.tidying = true;
@@ -182,26 +201,22 @@ export class CategorySync {
       .then(() =>
         this.run(async () => {
           this.tidying = false;
-          await this.deleteUnclaimed();
+          const kept = new Set([...this.claimed.values()].map((c) => c.id));
+          for (const channel of this.channels()) {
+            const dir = this.dirs.get(channel.id);
+            if (dir === undefined || kept.has(channel.id)) continue;
+            await channel.delete(`directory gone: ${dir}`);
+            this.dirs.delete(channel.id);
+            console.log(`deleted #${channel.name} (${dir})`);
+          }
           await this.order();
         }),
       )
       .catch((e) => console.error(`failed to tidy ${this.name}:`, e));
   }
 
-  private async deleteUnclaimed() {
-    const kept = new Set([...this.claimed.values()].map((c) => c.channelId));
-    for (const channel of this.textChannels()) {
-      const dir = this.dirs.get(channel.id);
-      if (dir === undefined || kept.has(channel.id)) continue;
-      await channel.delete(`directory gone: ${dir}`);
-      this.dirs.delete(channel.id);
-      console.log(`deleted #${channel.name} (${dir})`);
-    }
-  }
-
   // Managed channels take the slots managed channels already occupy, in rank
-  // order; unmanaged channels keep their place.
+  // order; unmanaged channels keep their place
   private async order(): Promise<void> {
     const byRank = (a: [string, { rank: readonly number[] }], b: [string, { rank: readonly number[] }]) => {
       for (let i = 0; i < Math.max(a[1].rank.length, b[1].rank.length); i++) {
@@ -210,8 +225,8 @@ export class CategorySync {
       }
       return a[0].localeCompare(b[0]);
     };
-    const wanted = [...this.claimed].sort(byRank).map(([, c]) => c.channelId);
-    const current = this.textChannels();
+    const wanted = [...this.claimed].sort(byRank).map(([, c]) => c.id);
+    const current = this.channels();
     const queue = wanted.flatMap((id) => current.find((channel) => channel.id === id) ?? []);
     const target = current.map((channel) => (this.dirs.get(channel.id) === undefined ? channel : queue.shift()!));
     if (target.every((channel, i) => channel === current[i])) return;
